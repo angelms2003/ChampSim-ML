@@ -16,13 +16,11 @@ default_seed_file = './scripts/seeds.txt'
 
 default_base_binary = 'bin/hashed_perceptron-no-no-no-no-lru-1core'
 default_bo_binary = 'bin/hashed_perceptron-no-no-no-bo-lru-1core'
-default_sisb_binary = 'bin/hashed_perceptron-no-no-no-sisb-lru-1core'
-default_sisb_bo_binary = 'bin/hashed_perceptron-no-no-no-sisb_bo-lru-1core'
 default_prefetcher_binary = 'bin/hashed_perceptron-no-no-no-from_file-lru-1core'
 
-baseline_names = ['No Prefetcher', 'Best Offset', 'SISB', 'SISB Best Offset']
-baseline_fns = ['no', 'bo', 'sisb', 'sisb_bo']
-baseline_binaries = [default_base_binary, default_bo_binary, default_sisb_binary, default_sisb_bo_binary]
+baseline_names = ['No Prefetcher', 'Best Offset']
+baseline_fns = ['no', 'bo']
+baseline_binaries = [default_base_binary, default_bo_binary]
 
 help_str = {
 'help': '''usage: {prog} command [<args>]
