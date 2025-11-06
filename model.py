@@ -529,7 +529,7 @@ class TerribleMLModel(MLPrefetchModel):
                 tr_loss = loss_train.item()
                 accs.append(float(acc))
                 losses.append(float(tr_loss))
-                if i % percent == 0:
+                if percent != 0 and i % percent == 0:
                     print('.', end='')
             print('Acc {}: {}'.format(epoch, sum(accs) / len(accs)))
             print('Epoch : ', epoch + 1, '\t', 'loss :', sum(losses))

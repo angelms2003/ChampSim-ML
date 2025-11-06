@@ -327,9 +327,10 @@ def eval_command():
 
     traces = {}
     for fn in os.listdir(args.results_dir):
-        # trace = fn.split('-hashed_perceptron-')[0]
-        trace = fn.split('.gz')[0]
-        trace += ".gz"
+	# trace = fn.split('-hashed_perceptron-')[0]
+        # trace = fn.split('.gz')[0]
+        # trace += ".gz"
+        trace = fn.split('.trace')[0]
         if trace not in traces:
             traces[trace] = {}
         if 'from_file' in fn:
@@ -414,6 +415,9 @@ def train_command():
 
     train_data, eval_data = read_load_trace_data(args.load_trace, args.num_prefetch_warmup_instructions)
 
+    print("Traning data size:",len(train_data))
+    print("Evaluation data size:",len(eval_data))
+
     model = Model()
     model.train(train_data)
 
@@ -476,5 +480,4 @@ def main():
     commands[sys.argv[1]]()
 
 if __name__ == '__main__':
-    sys.argv.append("eval")
     main()

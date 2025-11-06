@@ -1,3 +1,5 @@
+#!/bin/bash
+
 while read -r line; do
     arr=($line)
     mkdir -p $(dirname ${arr[0]})
