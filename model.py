@@ -109,7 +109,7 @@ class MLPrefetchModel(object):
         pass
     
     @abstractmethod
-    def train_and_test(self, train_data, test_data):
+    def train_and_test(self, train_data, test_data, graph_name = None):
         '''
         Train and test your model here using the train data and the test data
 
@@ -183,7 +183,7 @@ class BestOffset(MLPrefetchModel):
         '''
         print('Training BestOffset')
     
-    def train_and_test(self, train_data, test_data):
+    def train_and_test(self, train_data, test_data, graph_name = None):
         '''
         Train and test your model here using the train data and the test data
 
@@ -510,7 +510,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 if train_percent != 0 and i % train_percent == 0:
                     print('.', end='')
             print()
-            print('Training acc {}: {}'.format(epoch, sum(train_accs) / len(train_accs)))
+            print('Training accuracy {}: {}'.format(epoch, sum(train_accs) / len(train_accs)))
             print('Training epoch : ', epoch + 1, '\t', 'training loss :', sum(train_losses))
 
             avg_train_accs.append(sum(train_accs) / len(train_accs))
@@ -548,6 +548,12 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             avg_test_accs.append(sum(test_accs) / len(test_accs))
             total_test_loss.append(sum(test_losses))
+
+            # Early stopping: if the last two epochs showed a decrease in test accuracy, it means
+            # that the model is suffering from overfitting
+            if len(avg_test_accs) >= 3 and avg_test_accs[-1] < avg_test_accs[-2] and avg_test_accs[-2] < avg_test_accs[-3]:
+                print('EARLY STOPPED')
+                break
     
         # Once the model was trained and tested, the accuracies and losses are plotted
         if graph_name is not None:
@@ -698,7 +704,7 @@ class Hybrid(MLPrefetchModel):
         for prefetcher in self.prefetchers:
             prefetcher.train(data)
     
-    def train_and_test(self, train_data, test_data):
+    def train_and_test(self, train_data, test_data, graph_name = None):
         for prefetcher in self.prefetchers:
             prefetcher.train_and_test(train_data,test_data)
 

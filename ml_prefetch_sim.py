@@ -30,6 +30,7 @@ Available commands:
     run              Runs ChampSim on specified traces
     eval             Parses and computes metrics on simulation results
     train            Trains your model
+    train_and_test   Trains yout model and tests it to check for overfitting
     generate         Generates the prefetch file
     help             Displays this help message. Command-specific help messages
                      can be displayed with `{prog} help command`
