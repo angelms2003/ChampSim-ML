@@ -8,73 +8,51 @@ import os
 import torch
 import torch.nn as nn
 
+import matplotlib.pyplot as plt
+from time import time
+
 
 class CacheSimulator(object):
-
-    def __init__(self, sets, ways, block_size, eviction_hook=None, name=None) -> None:
+    def __init__(self, sets, ways, block_size) -> None:
         super().__init__()
         self.ways = ways
-        self.name = name
-        self.way_shift = int(math.log2(ways))
         self.sets = sets
+        self.set_shift = int(math.log2(sets))
         self.block_size = block_size
         self.block_shift = int(math.log2(block_size))
         self.storage = defaultdict(list)
         self.label_storage = defaultdict(list)
-        self.eviction_hook = eviction_hook
 
     def parse_address(self, address):
-        block = address >> self.block_shift
-        way = block % self.ways
-        tag = block >> self.way_shift
-        return way, tag
+        block_addr = address >> self.block_shift
+        cache_set = block_addr % self.sets
+        cache_tag = block_addr >> self.set_shift
+        return cache_set, cache_tag
 
     def load(self, address, label=None, overwrite=False):
-        way, tag = self.parse_address(address)
+        cache_set, cache_tag = self.parse_address(address)
         hit, l = self.check(address)
         if not hit:
-            self.storage[way].append(tag)
-            self.label_storage[way].append(label)
-            if len(self.storage[way]) > self.sets:
-                evicted_tag = self.storage[way].pop(0)
-                evicted_label = self.label_storage[way].pop(0)
-                if self.eviction_hook:
-                    self.eviction_hook(self.name, address, evicted_tag, evicted_label)
+            self.storage[cache_set].append(cache_tag)
+            self.label_storage[cache_set].append(label)
+            if len(self.storage[cache_set]) > self.ways:
+                evicted_tag = self.storage[cache_set].pop(0)
+                evicted_label = self.label_storage[cache_set].pop(0)
         else:
-            current_index = self.storage[way].index(tag)
-            _t, _l = self.storage[way].pop(current_index), self.label_storage[way].pop(current_index)
-            self.storage[way].append(_t)
-            self.label_storage[way].append(_l)
+            current_index = self.storage[cache_set].index(cache_tag)
+            _t, _l = self.storage[cache_set].pop(current_index), self.label_storage[cache_set].pop(current_index)
+            self.storage[cache_set].append(_t)
+            self.label_storage[cache_set].append(_l)
         if overwrite:
-            self.label_storage[way][self.storage[way].index(tag)] = label
+            self.label_storage[cache_set][self.storage[cache_set].index(tag)] = label
         return hit, l
 
     def check(self, address):
-        way, tag = self.parse_address(address)
-        if tag in self.storage[way]:
-            return True, self.label_storage[way][self.storage[way].index(tag)]
+        cache_set, cache_tag = self.parse_address(address)
+        if cache_tag in self.storage[cache_set]:
+            return True, self.label_storage[cache_set][self.storage[cache_set].index(cache_tag)]
         else:
             return False, None
-
-
-class CNN(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.feature = nn.Sequential(
-            nn.Conv1d(1, 8, 8),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(8, 8, 8),
-            nn.ReLU(inplace=True),
-        )
-        self.decoder = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(8 * 50, 64),
-        )
-        self.softmax = nn.Softmax()
-
-    def forward(self, input):
-        return self.softmax(self.decoder(self.feature(input).view(-1, 50 * 8)))
 
 
 class MLP(nn.Module):
@@ -82,32 +60,21 @@ class MLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.feature = nn.Sequential(
-            nn.Linear(128, 57 * 8),
+            # nn.Linear(128, 57 * 8),
+            nn.Linear(64, 57 * 8),
             nn.ReLU(inplace=True),
             nn.Linear(57 * 8, 50 * 8),
             nn.ReLU(inplace=True),
         )
         self.decoder = nn.Sequential(
             nn.Dropout(),
-            nn.Linear(8 * 50, 128),
+            # nn.Linear(8 * 50, 128),
+            nn.Linear(8 * 50, 64),
         )
         self.softmax = nn.Softmax()
 
     def forward(self, input):
         return self.softmax(self.decoder(self.feature(input).view(-1, 50 * 8)))
-
-
-class Bayesian(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.conditional = nn.Sequential(
-            nn.Linear(16 + 64, 256)
-        )
-        self.softmax = nn.Softmax()
-
-    def forward(self, input):
-        return self.softmax(self.conditional(input))
 
 
 class MLPrefetchModel(object):
@@ -140,6 +107,16 @@ class MLPrefetchModel(object):
         Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
         '''
         pass
+    
+    @abstractmethod
+    def train_and_test(self, train_data, test_data):
+        '''
+        Train and test your model here using the train data and the test data
+
+        The data is the same format given in the load traces. Namely:
+        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
+        '''
+        print('Training and testing BestOffset')
 
     @abstractmethod
     def generate(self, data):
@@ -162,99 +139,6 @@ class MLPrefetchModel(object):
         pass
 
 
-class NextLineModel(MLPrefetchModel):
-
-    def load(self, path):
-        # Load your pytorch / tensorflow model from the given filepath
-        print('Loading ' + path + ' for NextLineModel')
-
-    def save(self, path):
-        # Save your model to a file
-        print('Saving ' + path + ' for NextLineModel')
-
-    def train(self, data):
-        '''
-        Train your model here using the data
-
-        The data is the same format given in the load traces. Namely:
-        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
-        '''
-        print('Training NextLineModel')
-
-    def generate(self, data):
-        '''
-        Generate the prefetches for the prefetch file for ChampSim here
-
-        As a reminder, no looking ahead in the data and no more than 2
-        prefetches per unique instruction ID
-
-        The return format for this function is a list of (instr_id, pf_addr)
-        tuples as shown below
-        '''
-        print('Generating for NextLineModel')
-        prefetches = []
-        for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
-            # Prefetch the next two blocks
-            prefetches.append((instr_id, ((load_addr >> 6) + 5) << 6))
-            prefetches.append((instr_id, ((load_addr >> 6) + 10) << 6))
-
-        return prefetches
-
-
-class MementoModel(MLPrefetchModel):
-
-    mapping = {}
-    scores = defaultdict(int)
-    last_ip_access = defaultdict(list)
-    delay = eval(os.environ.get('MEMENTO_DELAY', '5'))
-    llc = CacheSimulator(16, 2048, 64)
-
-    def load(self, path):
-        # Load your pytorch / tensorflow model from the given filepath
-        print('Loading ' + path + ' for NextLineModel')
-
-    def save(self, path):
-        # Save your model to a file
-        print('Saving ' + path + ' for NextLineModel')
-
-    def train(self, data):
-        '''
-        Train your model here using the data
-
-        The data is the same format given in the load traces. Namely:
-        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
-        '''
-        print('Training NextLineModel')
-
-        for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
-            if len(self.last_ip_access[load_ip]) >= self.delay:
-                key = load_ip, self.last_ip_access[load_ip][0]
-                self.mapping[key] = load_addr
-                self.scores[key] += 1
-            self.last_ip_access[load_ip].append(load_addr)
-            if len(self.last_ip_access[load_ip]) > self.delay:
-                self.last_ip_access[load_ip].pop(0)
-
-    def generate(self, data):
-        '''
-        Generate the prefetches for the prefetch file for ChampSim here
-
-        As a reminder, no looking ahead in the data and no more than 2
-        prefetches per unique instruction ID
-
-        The return format for this function is a list of (instr_id, pf_addr)
-        tuples as shown below
-        '''
-        prefetches = []
-        for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
-            # Prefetch the next two blocks
-            key = load_ip, load_addr
-            if key in self.mapping and self.scores[key] > 0:
-                prefetches.append((instr_id, self.mapping[key]))
-
-        return prefetches
-
-
 class BestOffset(MLPrefetchModel):
     offsets = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 8, -8, 9, -9, 10, -10, 11, -11, 12, -12, 13, -13, 14,
                -14, 15, -15, 16, -16, 18, -18, 20, -20, 24, -24, 30, -30, 32, -32, 36, -36, 40, -40]
@@ -269,7 +153,8 @@ class BestOffset(MLPrefetchModel):
     low_score = int(20 * score_scale)
     max_score = int(31 * score_scale)
     max_round = int(100 * score_scale)
-    llc = CacheSimulator(16, 2048, 64)
+    # llc = CacheSimulator(16, 2048, 64)
+    llc = CacheSimulator(64, 3072, 128)
     rrl = {}
     rrr = {}
     dq = []
@@ -297,6 +182,15 @@ class BestOffset(MLPrefetchModel):
         Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
         '''
         print('Training BestOffset')
+    
+    def train_and_test(self, train_data, test_data):
+        '''
+        Train and test your model here using the train data and the test data
+
+        The data is the same format given in the load traces. Namely:
+        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
+        '''
+        print('Training and testing BestOffset')
 
     def rr_hash(self, address):
         return ((address >> 6) + address) % 64
@@ -415,16 +309,11 @@ class BestOffset(MLPrefetchModel):
         return prefetches
 
 
-class TerribleMLModel(MLPrefetchModel):
+class MLPBasedSubPrefetcher(MLPrefetchModel):
     """
     This class effectively functions as a wrapper around the above custom
     pytorch nn.Module. You can approach this in another way so long as the the
     load/save/train/generate functions behave as described above.
-
-    Disclaimer: It's terrible since the below criterion assumes a gold Y label
-    for the prefetches, which we don't really have. In any case, the below
-    structure more or less shows how one would use a ML framework with this
-    script. Happy coding / researching! :)
     """
 
     degree = 2
@@ -447,40 +336,103 @@ class TerribleMLModel(MLPrefetchModel):
         self.model.load_state_dict(torch.load(path))
 
     def save(self, path):
-        torch.save(self.model.state_dict(), path)
+        ## torch.save(self.model.state_dict(), path)
+        self.model.eval()
 
+        example_input = torch.randn(1, 64)
+        traced = torch.jit.trace(self.model, example_input)
+        traced.save(path)
+
+    # Batches the mem access data for the ML model
     def batch(self, data, batch_size=None):
+        # The default batch size is 256
         if batch_size is None:
             batch_size = self.batch_size
+        
+
         bucket_data = defaultdict(list)
         bucket_instruction_ids = defaultdict(list)
         batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
+
+        # Each line (each mem access of the original applicacion) is read
         for line in data:
+            # Each mem access contains five pieces of data
             instr_id, cycles, load_address, ip, hit = line
+
+            # We assume that pages are 4 KiB
             page = load_address >> 12
+
+            # This tuple stores the instruction pointer and the page
             ippage = (ip, page)
+
+            # The bucket key is ip by default
             bucket_key = eval(self.bucket)
+
+            # We access bucket_data[ip], which is a list
             bucket_buffer = bucket_data[bucket_key]
+
+            # The load instruction is appended to the list
             bucket_buffer.append(load_address)
+
+            # Just like we appended the address to bucket_data[ip], we
+            # append the instruction ID to bucket_instruction_ids[ip]
             bucket_instruction_ids[bucket_key].append(instr_id)
+
+            # The bucket_buffer size is limited to the size of the window that
+            # we have. This window is big enough to hold three things:
+            #   - Four history mem accesses (the mem accesses that the prefetcher
+            #     will use as input to predict)
+            #   - Five lookahead mem accesses (the prefetcher won't predict the
+            #     access right next to itself, but rather the access that is five
+            #     steps further)
+            #   - Two goal mem accesses (these must be the output of the prefetcher)
             if len(bucket_buffer) >= self.window:
+
+                # The current page is the page of the latest access
                 current_page = bucket_buffer[self.history - 1] >> 12
+                
+                # We also record the page of the previous mem access
                 last_page = bucket_buffer[self.history - 2] >> 12
+
+                # If these two pages are different, that means that we jumped
+                # from one page to another: we need to record it in the PTT. Maybe
+                # this should be done out of this if block?
                 if last_page != current_page:
                     self.next_page_table[ip][last_page] = current_page
+                
+                # The page for this input will be the lastest page
                 batch_page.append(bucket_buffer[self.history - 1] >> 12)
+
+                # The predicted next page will be the page according to the PTT given
+                # our current page and IP. If there is no entry, the next page is the same page
                 batch_next_page.append(self.next_page_table[ip].get(current_page, current_page))
+                
                 # TODO send transition information for labels to represent
+
+                # We can create an input and add it to the batch. The input uses the addresses
+                # of the 4 first accesses in the window and the current page. It is necessary to
+                # represent this information so that it makes sense to the MLP model.
                 batch_x.append(self.represent(bucket_buffer[:self.history], current_page))
+
+                # The output is created the same way, but using the two last accesses, which are the
+                # accesses to be prefetched
                 batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
+
+                # The instruction ID of this input will be the ID of the last mem access
                 batch_instr_id.append(bucket_instruction_ids[bucket_key][self.history - 1])
+
+                # The first mem access is discarded as the window will progress one access further
                 bucket_buffer.pop(0)
                 bucket_instruction_ids[bucket_key].pop(0)
+            
+            # If we already have enough info for a batch, we can use it with the MLP model
             if len(batch_x) == batch_size:
                 if torch.cuda.is_available():
                     yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
                 else:
                     yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
+                
+                # The batch info is cleared and we begin filling it again with new info
                 batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
 
     def accuracy(self, output, label):
@@ -493,32 +445,58 @@ class TerribleMLModel(MLPrefetchModel):
             )
         ) / label.shape[0] / self.k
 
-    def train(self, data):
+    def train_and_test(self, train_data, test_data, graph_name = None):
         print('LOOKAHEAD =', self.lookahead)
         print('BUCKET =', self.bucket)
+
+        # This is the optimization function for finding the correct values for the
+        # weights of the MLP
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        # defining the loss function
+
+        # This is the loss function for defining how far we are from the correct output
         # criterion = nn.CrossEntropyLoss()
         criterion = nn.BCELoss()
-        # checking if GPU is available
+        
+        # We check if there is a GPU available
         if torch.cuda.is_available():
             self.model = self.model.cuda()
             criterion = criterion.cuda()
-        # converting the data into GPU format
+
+        # idk what this is (the train function for the MLP is empty, inherited from
+        # MLPrefetchModel)
         self.model.train()
 
+        # The average accuracy for train and test in each epoch
+        avg_train_accs = []
+        avg_test_accs = []
+
+        # The loss for train and test in each epoch
+        total_train_loss = []
+        total_test_loss = []
+
+        # For each epoch, the model is trained with all training data and
+        # tested with all test data
         for epoch in range(self.epochs):
-            accs = []
-            losses = []
-            percent = len(data) // self.batch_size // 100
-            for i, (instr_id, page, next_page, x_train, y_train) in enumerate(self.batch(data)):
+            # TRAIN PART
+
+            # Accuracies
+            train_accs = []
+
+            # Calculated losses
+            train_losses = []
+
+            train_percent = len(train_data) // self.batch_size // 100
+
+            # The data is batched. For each batch...
+            for i, (instr_id, page, next_page, x_train, y_train) in enumerate(self.batch(train_data)):
+
                 # clearing the Gradients of the model parameters
                 optimizer.zero_grad()
 
-                # prediction for training and validation set
+                # prediction for training set
                 output_train = self.model(x_train)
 
-                # computing the training and validation loss
+                # computing the training loss and accuracy
                 loss_train = criterion(output_train, y_train)
                 acc = self.accuracy(output_train, y_train)
                 # print('Acc {}: {}'.format(epoch, acc))
@@ -527,33 +505,135 @@ class TerribleMLModel(MLPrefetchModel):
                 loss_train.backward()
                 optimizer.step()
                 tr_loss = loss_train.item()
-                accs.append(float(acc))
-                losses.append(float(tr_loss))
-                if percent != 0 and i % percent == 0:
+                train_accs.append(float(acc))
+                train_losses.append(float(tr_loss))
+                if train_percent != 0 and i % train_percent == 0:
                     print('.', end='')
-            print('Acc {}: {}'.format(epoch, sum(accs) / len(accs)))
-            print('Epoch : ', epoch + 1, '\t', 'loss :', sum(losses))
+            print()
+            print('Training acc {}: {}'.format(epoch, sum(train_accs) / len(train_accs)))
+            print('Training epoch : ', epoch + 1, '\t', 'training loss :', sum(train_losses))
+
+            avg_train_accs.append(sum(train_accs) / len(train_accs))
+            total_train_loss.append(sum(train_losses))
+            
+            ########################################################
+            # TEST PART
+
+            # Accuracies
+            test_accs = []
+
+            # Calculated losses
+            test_losses = []
+
+            test_percent = len(test_data) // self.batch_size // 100
+
+            # The data is batched. For each batch...
+            for i, (instr_id, page, next_page, x_test, y_test) in enumerate(self.batch(test_data)):
+                with torch.no_grad():
+                    # prediction for testing set
+                    output_test = self.model(x_test)
+
+                    # computing the testing loss and accuracy
+                    loss_test = criterion(output_test, y_test)
+                    acc = self.accuracy(output_test, y_test)
+
+                    tr_loss = loss_test.item()
+                    test_accs.append(float(acc))
+                    test_losses.append(float(tr_loss))
+                    if test_percent != 0 and i % test_percent == 0:
+                        print('.', end='')
+            print()
+            print('Test accuracy {}: {}'.format(epoch, sum(test_accs) / len(test_accs)))
+            print('Test Epoch : ', epoch + 1, '\t', 'test loss :', sum(test_losses))
+
+            avg_test_accs.append(sum(test_accs) / len(test_accs))
+            total_test_loss.append(sum(test_losses))
+    
+        # Once the model was trained and tested, the accuracies and losses are plotted
+        if graph_name is not None:
+            epochs = range(1, len(avg_train_accs) + 1)
+
+            plt.figure(figsize=(10, 5))
+
+            # Accuracy plot
+            plt.subplot(1, 2, 1)
+            plt.plot(epochs, avg_train_accs, label='Train Accuracy', marker='o')
+            plt.plot(epochs, avg_test_accs, label='Test Accuracy', marker='o')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy')
+            plt.title('Train vs Test Accuracy')
+            plt.legend()
+            plt.grid(True)
+
+            # =======================
+            # 2. Loss plot
+            # =======================
+            plt.subplot(1, 2, 2)
+            plt.plot(epochs, total_train_loss, label='Train Loss', marker='o')
+            plt.plot(epochs, total_test_loss, label='Test Loss', marker='o')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Train vs Test Loss')
+            plt.legend()
+            plt.grid(True)
+
+            plt.tight_layout()
+            
+            plt.savefig(f"{graph_name}.png", dpi=300)
 
     def generate(self, data):
+
+        # The model is instanced
         self.model.eval()
+
         prefetches = []
         accs = []
+
+        # This stores a sequential index and the instruction ID for each access
         order = {i: line[0] for i, line in enumerate(data)}
+
+        # This stores the same thing as order but the key is the value and vice versa
         reverse_order = {v: k for k, v in order.items()}
+
+        # We batch the data and iterate through each batch
         for i, (instr_ids, pages, next_pages, x, y) in enumerate(self.batch(data)):
             # breakpoint()
+
+            # The current page of each input (page of the last access of the history)
             pages = torch.LongTensor(pages).to(x.device)
+
+            # The next pages of each input (predicted next page according to the PTT)
             next_pages = torch.LongTensor(next_pages).to(x.device)
+
+            # The instruction IDs of the last access of the history of each input
             instr_ids = torch.LongTensor(instr_ids).to(x.device)
+
+            # The variable x contains the input batch
             y_preds = self.model(x)
+
+            # We calculate the accuracy with the two next accesses that should have been predicted
             accs.append(float(self.accuracy(y_preds, y)))
+
+            # We obtain the top 2 offsets of each output. This is an array of size (N, deg), where
+            # N is the amount of elements in the batch and deg is the prefetching degree (how many
+            # prefetches per access)
             topk = torch.topk(y_preds, self.degree).indices
+
+            # We don't want a 2D array of size (N, deg), but a 1D array of size (N * deg)
             shape = (topk.shape[0] * self.degree,)
             topk = topk.reshape(shape)
+
+            # Since we have a topk array of shape (N * deg) but the pages, next_pages and instr_ids are
+            # arrays of shape (N), we need to repeat each element deg times. For example, if pages is an array
+            # with this content: [34, 90, 10], it must be [34, 34, 90, 90, 10, 10] because deg is 2
             pages = torch.repeat_interleave(pages, self.degree)
             next_pages = torch.repeat_interleave(next_pages, self.degree)
             instr_ids = torch.repeat_interleave(instr_ids, self.degree)
-            addresses = (topk < 64) * (pages << 12) + (topk >= 64) * ((next_pages << 12) - (64 << 6)) + (topk << 6)
+
+            # addresses = (topk < 64) * (pages << 12) + (topk >= 64) * ((next_pages << 12) - (64 << 6)) + (topk << 6)
+
+            # We calculate the addresses once the pages, next_pages and isntr_ids arrays are of the right size
+            addresses = (topk < 32) * (pages << 12) + (topk >= 32) * ((next_pages << 12) - (32 << 7)) + (topk << 7)
             #addresses = (pages << 12) + (topk << 6)
             prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
             if i % 100 == 0:
@@ -563,397 +643,43 @@ class TerribleMLModel(MLPrefetchModel):
         return prefetches
 
     def represent(self, addresses, first_page, box=True):
-        blocks = [(address >> 6) % 64 for address in addresses]
+        # This function takes a list of memory accesses and returns
+        # a valid input or output for the MLP model
+
+        #blocks = [(address >> 6) % 64 for address in addresses]
+
+        # This is a list that contains block offsets for every address
+        blocks = [(address >> 7) % 32 for address in addresses]
+
+        # This is a list that contains a page address for every address
         pages = [(address >> 12) for address in addresses]
-        raw = [0 for _ in range(128)]
+
+        # raw = [0 for _ in range(128)]
+
+        # This represents the input layer (or output layer)
+        raw = [0 for _ in range(64)]
+
+        # For each block...
         for i, block in enumerate(blocks):
+            # If the block is located in the current page, then add it to 
+            # the first positions of the layer
             if first_page == pages[i]:
                 raw[block] = 1
             else:
-                raw[64 + block] = 1
+                raw[32 + block] = 1
+        
+        # Box is true when creating the input, and false when creating
+        # the output
         if box:
             return [raw]
         else:
             return raw
-
-
-class BayesianModel(MLPrefetchModel):
-    """
-    This class effectively functions as a wrapper around the above custom
-    pytorch nn.Module. You can approach this in another way so long as the the
-    load/save/train/generate functions behave as described above.
-
-    Disclaimer: It's terrible since the below criterion assumes a gold Y label
-    for the prefetches, which we don't really have. In any case, the below
-    structure more or less shows how one would use a ML framework with this
-    script. Happy coding / researching! :)
-    """
-
-    degree = 2
-    k = 1
-    history = 3
-    lookahead = int(os.environ.get('LOOKAHEAD', '10'))
-    bucket = os.environ.get('BUCKET', 'ip')
-    window = history + lookahead + k
-    filter_window = lookahead * degree
-    batch_size = 1024
-    offset_minimum, offset_maximum = -128, 127
-
-    def __init__(self):
-        self.model = Bayesian()
-
-    def load(self, path):
-        self.model.load_state_dict(torch.load(path))
-
-    def save(self, path):
-        torch.save(self.model.state_dict(), path)
-
-    def batch(self, data, batch_size=None):
-        if batch_size is None:
-            batch_size = self.batch_size
-        bucket_data = defaultdict(list)
-        bucket_instruction_ids = defaultdict(list)
-        batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
-        for line in data:
-            instr_id, cycles, load_address, ip, hit = line
-            page = load_address >> 12
-            bucket_buffer = bucket_data[eval(self.bucket)]
-            bucket_instruction_ids_buffer = bucket_instruction_ids[eval(self.bucket)]
-            bucket_buffer.append(load_address)
-            bucket_instruction_ids_buffer.append(instr_id)
-            if len(bucket_buffer) > self.window:
-                o_accesses = [bucket_buffer[self.history - 1]] + bucket_buffer[-self.k:]
-                if self.offset_minimum <= (o_accesses[self.k] >> 6) - (o_accesses[0] >> 6) <= self.offset_maximum:
-                    batch_x.append(self.represent_input(ip, bucket_buffer[:self.history]))
-                    batch_y.append(
-                        self.represent_output(o_accesses, box=False))
-                    batch_instr_id.append(bucket_instruction_ids_buffer[-self.k-self.lookahead])
-                    batch_page.append(bucket_buffer[-self.k-self.lookahead] >> 12)
-                bucket_buffer.pop(0)
-                bucket_instruction_ids_buffer.pop(0)
-            if len(batch_x) == batch_size:
-                if torch.cuda.is_available():
-                    yield batch_instr_id, batch_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
-                else:
-                    yield batch_instr_id, batch_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
-                batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
-
-    def accuracy(self, output, label):
-        return torch.sum(
-            torch.logical_and(
-                torch.scatter(
-                    torch.zeros(output.shape, device=output.device), -1, torch.topk(output, self.k).indices, 1
-                ),
-                label
-            )
-        ) / label.shape[0] / self.k
-
-    def train(self, data):
-        print('LOOKAHEAD =', self.lookahead)
-        print('BUCKET =', self.bucket)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
-        # defining the loss function
-        # criterion = nn.CrossEntropyLoss()
-        criterion = nn.BCELoss()
-        # checking if GPU is available
-        if torch.cuda.is_available():
-            self.model = self.model.cuda()
-            criterion = criterion.cuda()
-        # converting the data into GPU format
-        self.model.train()
-
-        for epoch in range(20):
-            accs = []
-            losses = []
-            percent = len(data) // self.batch_size // 100
-            for i, (instr_id, page, x_train, y_train) in enumerate(self.batch(data)):
-                # clearing the Gradients of the model parameters
-                optimizer.zero_grad()
-
-                # prediction for training and validation set
-                output_train = self.model(x_train).squeeze()
-
-                # computing the training and validation loss
-                loss_train = criterion(output_train, y_train)
-                acc = self.accuracy(output_train, y_train)
-                # print('Acc {}: {}'.format(epoch, acc))
-
-                # computing the updated weights of all the model parameters
-                loss_train.backward()
-                optimizer.step()
-                tr_loss = loss_train.item()
-                accs.append(float(acc))
-                losses.append(float(tr_loss))
-                if i % percent == 0:
-                    print('.', end='')
-            print('Acc {}: {}'.format(epoch, sum(accs) / len(accs)))
-            print('Epoch : ', epoch + 1, '\t', 'loss :', sum(losses))
-
-    def generate(self, data):
-        self.model.eval()
-        prefetches = []
-        accs = []
-        for i, (instr_ids, pages, x, y) in enumerate(self.batch(data)):
-            # breakpoint()
-            pages = torch.LongTensor(pages).to(x.device)
-            instr_ids = torch.LongTensor(instr_ids).to(x.device)
-            y_preds = self.model(x)
-            accs.append(float(self.accuracy(y_preds, y)))
-            topk = torch.topk(y_preds, self.degree).indices
-            shape = (topk.shape[0] * self.degree,)
-            topk = topk.reshape(shape)
-            pages = torch.repeat_interleave(pages, self.degree)
-            instr_ids = torch.repeat_interleave(instr_ids, self.degree)
-            addresses = (pages << 12) + (topk << 6)
-            prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
-            if i % 100 == 0:
-                print('Chunk', i, 'Accuracy', sum(accs) / len(accs))
-        return prefetches
-
-    def represent_input(self, ip, addresses, box=True):
-        ip = ip % 16
-        offsets = [(addresses[i + 1] >> 6) - (addresses[i] >> 6) - self.offset_minimum for i in range(len(addresses) - 1)]
-        hashed_offsets = [o % 64 for o in offsets]
-        raw = [0 for _ in range(16 + 64)]
-        for block in hashed_offsets:
-            raw[16 + block] = 1
-        raw[ip] = 1
-        if box:
-            return [raw]
-        else:
-            return raw
-
-    def represent_output(self, addresses, box=True):
-        offsets = [(addresses[i + 1] >> 6) - (addresses[i] >> 6) - self.offset_minimum for i in range(len(addresses) - 1)]
-        raw = [0 for _ in range(self.offset_maximum - self.offset_minimum + 1)]
-        for o in offsets:
-            if 0 <= o < len(raw):
-                raw[o] = 1
-        if box:
-            return [raw]
-        else:
-            return raw
-
-# Replace this if you create your own model
-
-
-class BOMemento(BestOffset):
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.memento = MementoModel()
-
-    def train(self, data):
-        '''
-        Generate the prefetches for the prefetch file for ChampSim here
-
-        As a reminder, no looking ahead in the data and no more than 2
-        prefetches per unique instruction ID
-
-        The return format for this function is a list of (instr_id, pf_addr)
-        tuples as shown below
-        '''
-        print('Generating for BestOffset')
-        prefetches = []
-        prefetch_requests = []
-        memento_prefetch_requests = []
-        percent = len(data) // 100
-
-        bo_useful = defaultdict(set)
-        memento_useful = defaultdict(set)
-
-        train_memento_data = data[:len(data) // 2]
-        self.memento.train(train_memento_data)
-
-        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data[len(data) // 2:]):
-            hit, prefetched = self.llc.load(load_addr, False)
-            if hit and prefetched:
-                bo_useful[prefetched].add(load_addr)
-            memento_hit, memento_prefetched = self.memento.llc.load(load_addr, False)
-            if memento_hit and memento_prefetched:
-                memento_useful[memento_prefetched].add(load_addr)
-
-            # handle arrived prefetch requests for bo
-            while prefetch_requests and prefetch_requests[0][0] + self.memory_latency < cycle_count:
-                fill_addr = prefetch_requests[0][1]
-                h, p = self.llc.load(fill_addr, prefetch_requests[0][2])
-                if not h:
-                    if self.best_index == -1:
-                        fill_line_addr = fill_addr >> 6
-                        if self.best_index != -1:
-                            offset = self.offsets[self.best_index]
-                        else:
-                            offset = 0
-                        self.rr_add_immediate(fill_line_addr - offset)
-                prefetch_requests.pop(0)
-
-            # handle arrived prefetch requests for bo
-            while prefetch_requests and prefetch_requests[0][0] + self.memory_latency < cycle_count:
-                fill_addr = prefetch_requests[0][1]
-                h, p = self.llc.load(fill_addr, prefetch_requests[0][2])
-                if not h:
-                    if self.best_index == -1:
-                        fill_line_addr = fill_addr >> 6
-                        if self.best_index != -1:
-                            offset = self.offsets[self.best_index]
-                        else:
-                            offset = 0
-                        self.rr_add_immediate(fill_line_addr - offset)
-                prefetch_requests.pop(0)
-
-            # handle arrived memory accesses for memento
-            while memento_prefetch_requests and memento_prefetch_requests[0][0] + self.memory_latency < cycle_count:
-                fill_addr = memento_prefetch_requests[0][1]
-                h, p = self.memento.llc.load(fill_addr, True)
-                memento_prefetch_requests.pop(0)
-
-            self.rr_pop(cycle_count)
-            if not hit or prefetched:
-                line_addr = (load_addr >> 6)
-                self.train_bo(line_addr)
-                self.rr_add(cycle_count, line_addr)
-                if self.best_index != -1 and self.best_index_score > self.low_score:
-                    addr_1 = (line_addr + 1 * self.offsets[self.best_index]) << 6
-                    addr_2 = (line_addr + 2 * self.offsets[self.best_index]) << 6
-                    addr_2_alt = (line_addr + 1 * self.offsets[self.second_best_index]) << 6
-                    acc = len({addr_2 >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
-                    self.acc.append(acc)
-                    acc_alt = len({addr_2_alt >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
-                    self.acc_alt.append(acc_alt)
-                    # if acc_alt > acc:
-                    #     addr_2 = addr_2_alt
-                    prefetches.append((instr_id, addr_1))
-                    prefetches.append((instr_id, addr_2))
-                    prefetch_requests.append((cycle_count, addr_1, instr_id))
-                    prefetch_requests.append((cycle_count, addr_2, instr_id))
-            else:
-                pass
-
-            # prefetch for memento
-            for iid, address in self.memento.generate([(instr_id, cycle_count, load_addr, load_ip, llc_hit)]):
-                memento_prefetch_requests.append((cycle_count, address, instr_id))
-
-            if i % percent == 0:
-                print(i // percent, self.active_offsets, self.best_index_score,
-                      sum(self.acc) / 2 / (len(self.acc) + 1),
-                      sum(self.acc_alt) / 2 / (len(self.acc_alt) + 1))
-                print('useful bo', len(bo_useful), 'memento', len(memento_useful))
-                self.acc.clear()
-                self.acc_alt.clear()
-                self.active_offsets.clear()
-
-        history = 4
-        classification_data = []
-        classification_labels = []
-        offset_history = []
-        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data[len(data) // 2:]):
-            offset_history.append(load_addr)
-            if len(offset_history) > history + 1:
-                offset_history.pop(0)
-            else:
-                continue
-            classification_data.append([offset_history[i] - offset_history[i - 1] for i in range(1, len(offset_history))])
-            if len(bo_useful[instr_id]) >= len(memento_useful[instr_id]):
-                classification_labels.append(1)
-            else:
-                classification_labels.append(0)
-
-        return prefetches
-
-
-class MultiSaturatingCounter:
-
-    def __init__(self, keys, limit=64) -> None:
-        super().__init__()
-        self.counters = {key: 0 for key in keys}
-        self.limit = limit
-
-    def promote(self, key, factor=1):
-        self.counters[key] += factor * len(self.counters)
-        for key in self.counters:
-            self.counters[key] -= factor
-        for key in self.counters:
-            if self.counters[key] < -self.limit:
-                self.counters[key] = -self.limit
-            if self.counters[key] > self.limit:
-                self.counters[key] = self.limit
-
-    @property
-    def best_order(self):
-        return [-p for _, p in sorted([(v, -k) for k, v in self.counters.items()], reverse=True)]
-
-
-class SetDueler(MLPrefetchModel):
-
-    prefetcher_classes = (BestOffset,
-                          TerribleMLModel, )
-
-    demotion_factor = eval(os.environ.get('DUELER_DEMOTION_FACTOR', '1'))
-    promotion_factor = eval(os.environ.get('DUELER_PROMOTION_FACTOR', '0'))
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.prefetchers = [prefetcher_class() for prefetcher_class in self.prefetcher_classes]
-
-    def load(self, path):
-        for prefetcher in self.prefetchers:
-            prefetcher.load(path)
-
-    def save(self, path):
-        for prefetcher in self.prefetchers:
-            prefetcher.save(path)
-
-    def train(self, data):
-        # data = data[:len(data) // 5]
-        for prefetcher in self.prefetchers:
-            prefetcher.train(data)
-
-    def generate(self, data):
-        # data = data[:len(data) // 50]
-        prefetch_sets = defaultdict(lambda: defaultdict(list))
-        memory_latency = 200
-        for p, prefetcher in enumerate(self.prefetchers):
-            prefetches = prefetcher.generate(data)
-            for iid, addr in prefetches:
-                prefetch_sets[p][iid].append((iid, addr))
-        total_prefetches = []
-        prefetch_request_sets = {p: [] for p, _ in enumerate(self.prefetchers)}
-        counters = MultiSaturatingCounter(range(len(self.prefetchers)))
-        cache_models = []
-
-        def demotion(cache_name, address, tag, label):
-            if label:
-                counters.promote(p, self.demotion_factor)
-        for p, _ in enumerate(self.prefetchers):
-            cache_models.append(CacheSimulator(16, 2048, 64, eviction_hook=demotion, name=p))
-        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data):
-
-            for p, _ in enumerate(self.prefetchers):
-                while prefetch_request_sets[p] and prefetch_request_sets[p][0][0] + memory_latency < cycle_count:
-                    h, l = cache_models[p].load(prefetch_request_sets[p][0][1], True)
-                    prefetch_request_sets[p].pop(0)
-
-            for p, _ in enumerate(self.prefetchers):
-                hit, prefetched = cache_models[p].load(load_addr, False, overwrite=True)
-                if prefetched:
-                    counters.promote(p, self.promotion_factor)
-            instr_prefetches = []
-            for winner in counters.best_order:
-                instr_prefetches.extend(prefetch_sets[winner][instr_id])
-                break
-            for winner in counters.best_order:
-                for iid, paddr in prefetch_sets[winner][instr_id]:
-                    prefetch_request_sets[winner].append((cycle_count, paddr))
-            instr_prefetches = instr_prefetches[:2]
-            total_prefetches.extend(instr_prefetches)
-        return total_prefetches
 
 
 class Hybrid(MLPrefetchModel):
 
     prefetcher_classes = (BestOffset,
-                          TerribleMLModel, )
+                          MLPBasedSubPrefetcher, )
 
     def __init__(self) -> None:
         super().__init__()
@@ -971,8 +697,13 @@ class Hybrid(MLPrefetchModel):
     def train(self, data):
         for prefetcher in self.prefetchers:
             prefetcher.train(data)
+    
+    def train_and_test(self, train_data, test_data):
+        for prefetcher in self.prefetchers:
+            prefetcher.train_and_test(train_data,test_data)
 
     def generate(self, data):
+        # Data is a list. Each entry is another list that contains info for an access.
         prefetch_sets = defaultdict(lambda: defaultdict(list))
         for p, prefetcher in enumerate(self.prefetchers):
             prefetches = prefetcher.generate(data)

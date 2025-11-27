@@ -138,6 +138,23 @@ Options:
         the metric computation.
 '''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
 
+'train_and_test': '''usage: {prog} train_and_test <train-load-trace> <test-load-trace> [--model <model-path>] [--graph-name <graph-name>]
+
+Description:
+    {prog} train_and_test <train-load-trace> <test-load-trace>
+        Trains your model on the given train load trace and tests it on the
+        given test trace
+
+Options:
+    --model <model-path>
+        Saves model to this location. I recomment something like model.pt.
+        If not specified, the trained model is not saved and is lost forever.
+    --graph-name <graph-name>
+        Saves a graph with the accuracy and loss values for training and test to
+        this location. For example, graph.png.
+
+'''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
+
 'generate': '''usage: {prog} generate <load-trace> <prefetch-file> [--model <model-path>] [--num-prefetch-warmup-instructions <num-warmup-instructions>]
 
 Description:
@@ -364,7 +381,7 @@ def generate_prefetch_file(path, prefetches):
         for instr_id, pf_addr in prefetches:
             print(instr_id, hex(pf_addr)[2:], file=f)
 
-def read_load_trace_data(load_trace, num_prefetch_warmup_instructions):
+def read_load_trace_data(load_trace, num_prefetch_warmup_instructions = 999999999):
     
     def process_line(line):
         split = line.strip().split(', ')
@@ -428,6 +445,33 @@ def train_command():
         prefetches = model.generate(eval_data)
         generate_prefetch_file(args.generate, prefetches)
 
+def train_and_test_command():
+    if len(sys.argv) < 3:
+        print(help_str['train_and_test'])
+        exit(-1)
+    # 'train_and_test': '''usage: {prog} train_and_test <train-load-trace> <test-load-trace> [--model <model-path>] [--graph-name <graph-name>]
+
+    parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
+    parser.add_argument('train_load_trace', default=None)
+    parser.add_argument('test_load_trace', default=None)
+    parser.add_argument('--model', default=None)
+    parser.add_argument('--graph-name', default=None)
+
+    args = parser.parse_args(sys.argv[2:])
+
+    train_data, unused = read_load_trace_data(args.train_load_trace)
+    test_data, unused = read_load_trace_data(args.test_load_trace)
+
+    print("Traning data size:",len(train_data))
+    print("Test data size:",len(test_data))
+
+    model = Model()
+
+    model.train_and_test(train_data, test_data, args.graph_name)
+
+    if args.model is not None:
+        model.save(args.model)
+
 def generate_command():
     if len(sys.argv) < 3:
         print(help_str['generate'])
@@ -466,6 +510,7 @@ commands = {
     'run': run_command,
     'eval': eval_command,
     'train': train_command,
+    'train_and_test': train_and_test_command,
     'generate': generate_command,
     'help': help_command,
 }
