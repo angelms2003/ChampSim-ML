@@ -706,7 +706,7 @@ class Hybrid(MLPrefetchModel):
     
     def train_and_test(self, train_data, test_data, graph_name = None):
         for prefetcher in self.prefetchers:
-            prefetcher.train_and_test(train_data,test_data)
+            prefetcher.train_and_test(train_data,test_data, graph_name)
 
     def generate(self, data):
         # Data is a list. Each entry is another list that contains info for an access.

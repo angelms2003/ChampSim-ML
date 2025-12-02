@@ -2,6 +2,14 @@
 
 #SBATCH --chdir=/scratch/nas/3/angelm/ChampSim-ML
 
+#SBATCH -c 4
+
+#SBATCH --mem=8G
+
+#SBATCH --nodes=1
+
+#SBATCH --output=train-all-champsim-%j.log
+
 prefetcherName="MPMLP"
 
 memoryPerJob="100G"
