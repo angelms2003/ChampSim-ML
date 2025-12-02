@@ -109,7 +109,7 @@ class MLPrefetchModel(object):
         pass
     
     @abstractmethod
-    def train_and_test(self, train_data, test_data, graph_name = None):
+    def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         '''
         Train and test your model here using the train data and the test data
 
@@ -183,7 +183,7 @@ class BestOffset(MLPrefetchModel):
         '''
         print('Training BestOffset')
     
-    def train_and_test(self, train_data, test_data, graph_name = None):
+    def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         '''
         Train and test your model here using the train data and the test data
 
@@ -445,7 +445,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             )
         ) / label.shape[0] / self.k
 
-    def train_and_test(self, train_data, test_data, graph_name = None):
+    def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         print('LOOKAHEAD =', self.lookahead)
         print('BUCKET =', self.bucket)
 
@@ -548,6 +548,9 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             avg_test_accs.append(sum(test_accs) / len(test_accs))
             total_test_loss.append(sum(test_losses))
+
+            # A snapshot of the model for this epoch is saved
+            self.save(model_name+"-epoch"+str(epoch)+".pt")
 
             # Early stopping: if the last two epochs showed a decrease in test accuracy, it means
             # that the model is suffering from overfitting
@@ -704,9 +707,9 @@ class Hybrid(MLPrefetchModel):
         for prefetcher in self.prefetchers:
             prefetcher.train(data)
     
-    def train_and_test(self, train_data, test_data, graph_name = None):
+    def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         for prefetcher in self.prefetchers:
-            prefetcher.train_and_test(train_data,test_data, graph_name)
+            prefetcher.train_and_test(self, train_data, test_data, model_name = None, graph_name = None)
 
     def generate(self, data):
         # Data is a list. Each entry is another list that contains info for an access.
@@ -729,5 +732,5 @@ class Hybrid(MLPrefetchModel):
         return total_prefetches
 
 
-ml_model_name = os.environ.get('ML_MODEL_NAME', 'Hybrid')
+ml_model_name = os.environ.get('ML_MODEL_NAME', 'MLPBasedSubPrefetcher')
 Model = eval(ml_model_name)

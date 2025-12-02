@@ -139,7 +139,7 @@ Options:
         the metric computation.
 '''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
 
-'train_and_test': '''usage: {prog} train_and_test <train-load-trace> <test-load-trace> [--model <model-path>] [--graph-name <graph-name>]
+'train_and_test': '''usage: {prog} train_and_test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>]
 
 Description:
     {prog} train_and_test <train-load-trace> <test-load-trace>
@@ -147,12 +147,14 @@ Description:
         given test trace
 
 Options:
-    --model <model-path>
-        Saves model to this location. I recomment something like model.pt.
-        If not specified, the trained model is not saved and is lost forever.
-    --graph-name <graph-name>
+    --model-name <model-path>
+        Saves a model for each epoch to this location. If not specified, the
+        trained model is not saved and is lost forever. The extension will
+        automatically be set to .pt, so it's not necessary to specify it.
+    --graph-name <graph-path>
         Saves a graph with the accuracy and loss values for training and test to
-        this location. For example, graph.png.
+        this location. The extension will automatically be set to .png, so it's not
+        necessary to specify it.
 
 '''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
 
@@ -450,12 +452,12 @@ def train_and_test_command():
     if len(sys.argv) < 3:
         print(help_str['train_and_test'])
         exit(-1)
-    # 'train_and_test': '''usage: {prog} train_and_test <train-load-trace> <test-load-trace> [--model <model-path>] [--graph-name <graph-name>]
+    # 'train_and_test': '''usage: {prog} train_and_test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>]
 
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
     parser.add_argument('train_load_trace', default=None)
     parser.add_argument('test_load_trace', default=None)
-    parser.add_argument('--model', default=None)
+    parser.add_argument('--model-name', default=None)
     parser.add_argument('--graph-name', default=None)
 
     args = parser.parse_args(sys.argv[2:])
@@ -468,10 +470,7 @@ def train_and_test_command():
 
     model = Model()
 
-    model.train_and_test(train_data, test_data, args.graph_name)
-
-    if args.model is not None:
-        model.save(args.model)
+    model.train_and_test(train_data, test_data, args.model_name, args.graph_name)
 
 def generate_command():
     if len(sys.argv) < 3:
