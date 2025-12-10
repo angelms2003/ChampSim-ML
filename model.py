@@ -455,12 +455,16 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
         # This is the loss function for defining how far we are from the correct output
         # criterion = nn.CrossEntropyLoss()
-        criterion = nn.BCELoss()
-        
+        # criterion = nn.BCELoss()
+        criterion = nn.BCEWithLogitsLoss()
+
         # We check if there is a GPU available
         if torch.cuda.is_available():
+            print("Using CUDA")
             self.model = self.model.cuda()
             criterion = criterion.cuda()
+        else:
+            print("NOT using CUDA")
 
         # idk what this is (the train function for the MLP is empty, inherited from
         # MLPrefetchModel)
@@ -554,9 +558,9 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # Early stopping: if the last two epochs showed a decrease in test accuracy, it means
             # that the model is suffering from overfitting
-            if len(avg_test_accs) >= 3 and avg_test_accs[-1] < avg_test_accs[-2] and avg_test_accs[-2] < avg_test_accs[-3]:
-                print('EARLY STOPPED')
-                break
+            # if len(avg_test_accs) >= 3 and avg_test_accs[-1] < avg_test_accs[-2] and avg_test_accs[-2] < avg_test_accs[-3]:
+            #     print('EARLY STOPPED')
+            #     break
     
         # Once the model was trained and tested, the accuracies and losses are plotted
         if graph_name is not None:

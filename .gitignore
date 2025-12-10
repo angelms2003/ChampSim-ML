@@ -17,7 +17,7 @@ generateMPMLP/
 ML-DPC/
 VulkanSimTest/
 VulkanSimTrain/
-graphs/
+graphs*/
 generateVulkanSim/
 *.pt
 *.log
