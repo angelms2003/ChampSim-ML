@@ -30,7 +30,8 @@ Available commands:
     run              Runs ChampSim on specified traces
     eval             Parses and computes metrics on simulation results
     train            Trains your model
-    train_and_test   Trains yout model and tests it to check for overfitting
+    train_and_test   Trains your model and tests it to check for overfitting
+    test             Tests your model in all trained epochs to check for overfitting
     generate         Generates the prefetch file
     help             Displays this help message. Command-specific help messages
                      can be displayed with `{prog} help command`
@@ -151,6 +152,23 @@ Options:
         Saves a model for each epoch to this location. If not specified, the
         trained model is not saved and is lost forever. The extension will
         automatically be set to .pt, so it's not necessary to specify it.
+    --graph-name <graph-path>
+        Saves a graph with the accuracy and loss values for training and test to
+        this location. The extension will automatically be set to .png, so it's not
+        necessary to specify it.
+
+'''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
+
+'test': '''usage: {prog} test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>]
+
+Description:
+    {prog} test <train-load-trace> <test-load-trace>
+        Tests a model by loading the snapshots of the model for each epoch
+        and testing its performance on training data and testing data.
+
+Options:
+    --model-name <model-path>
+        Loads a model for each epoch from this location.
     --graph-name <graph-path>
         Saves a graph with the accuracy and loss values for training and test to
         this location. The extension will automatically be set to .png, so it's not
@@ -472,6 +490,30 @@ def train_and_test_command():
 
     model.train_and_test(train_data, test_data, args.model_name, args.graph_name)
 
+def test_command():
+    if len(sys.argv) < 3:
+        print(help_str['test'])
+        exit(-1)
+    # 'test': '''usage: {prog} test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>]
+
+    parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
+    parser.add_argument('train_load_trace', default=None)
+    parser.add_argument('test_load_trace', default=None)
+    parser.add_argument('--model-name', default=None)
+    parser.add_argument('--graph-name', default=None)
+
+    args = parser.parse_args(sys.argv[2:])
+
+    train_data, unused = read_load_trace_data(args.train_load_trace)
+    test_data, unused = read_load_trace_data(args.test_load_trace)
+
+    print("Traning data size:",len(train_data))
+    print("Test data size:",len(test_data))
+
+    model = Model()
+
+    model.test(train_data, test_data, args.model_name, args.graph_name)
+
 def generate_command():
     if len(sys.argv) < 3:
         print(help_str['generate'])
@@ -511,6 +553,7 @@ commands = {
     'eval': eval_command,
     'train': train_command,
     'train_and_test': train_and_test_command,
+    'test': test_command,
     'generate': generate_command,
     'help': help_command,
 }

@@ -10,69 +10,12 @@
 
 #SBATCH --output=train-all-champsim-%j.log
 
-prefetcherName="MPMLP"
+memoryPerJob="16G"
 
-memoryPerJob="100G"
+queue="small_gpu"
 
-queue="big"
-
-millionsOfTrainingInstructions="100"
-
-generateDirectory="generate"$prefetcherName
-
-mkdir $generateDirectory
-
-mkdir logs
-
-for loadTrace in $(find ML-DPC/LoadTraces/ -type f);
+for benchmark in 429.mcf-s1 433.milc-s2 462.libquantum-s0 462.libquantum-s1 473.astar-s0 605.mcf-s2 607.cactuBSSN-s2 619.lbm-s3 621.wrf-s0 623.xalancbmk-s2 bc-12 bfs-14 cc-13 pr-3 sssp-10;
 do
-	if [[ "$loadTrace" == "ML-DPC/LoadTraces/gap/pr-3.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/gap/bc-12.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/gap/sssp-10.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/gap/cc-13.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/gap/bfs-14.txt.xz" ]]; then
-		memoryPerJob="16G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec17/621.wrf-s0.txt.xz" ]]; then
-		memoryPerJob="8G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec17/619.lbm-s3.txt.xz" ]]; then
-		memoryPerJob="16G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec17/623.xalancbmk-s2.txt.xz" ]]; then
-		memoryPerJob="32G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec17/605.mcf-s2.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec17/607.cactuBSSN-s2.txt.xz" ]]; then
-		memoryPerJob="8G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec06/429.mcf-s1.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec06/473.astar-s0.txt.xz" ]]; then
-		memoryPerJob="8G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec06/433.milc-s2.txt.xz" ]]; then
-		memoryPerJob="16G"
-		queue="all"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec06/462.libquantum-s0.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	elif [[ "$loadTrace" == "ML-DPC/LoadTraces/spec06/462.libquantum-s1.txt.xz" ]]; then
-		memoryPerJob="100G"
-		queue="big"
-	fi
-
-	echo "Executing sbatch train_one_job.sh with arguments:" --output="logs/"$(echo $loadTrace | cut -d'/' -f4 | awk -F'.xz' '{print $1}')"-%j.out" --error="logs/"$(echo $loadTrace | cut -d'/' -f4 | awk -F'.xz' '{print $1}')"-error-%j.out" "--mem="$memoryPerJob "-q" $queue $loadTrace ${generateDirectory}/$prefetcherName-$(echo $loadTrace | cut -d'/' -f4 | awk -F'.xz' '{print $1}') $millionsOfTrainingInstructions
-	sbatch --output="logs/"$(echo $loadTrace | cut -d'/' -f4 | awk -F'.xz' '{print $1}')"-%j.out" --error="logs/"$(echo $loadTrace | cut -d'/' -f4 | awk -F'.xz' '{print $1}')"-error-%j.out" --mem=$memoryPerJob -q $queue train_one_job.sh $loadTrace ${generateDirectory}/$prefetcherName-$(echo $loadTrace | cut -d'/' -f4 | awk -F'.xz' '{print $1}') $millionsOfTrainingInstructions
+	echo "Executing sbatch train_test_one_job.sh with arguments:" --output="logs/"${benchmark}"-%j.out" --error="logs/"${benchmark}"-error-%j.out" "--mem="$memoryPerJob "-c" 4 "-q" $queue "ChampSimTrain/"${benchmark}".txt.xz" "ChampSimTest/"${benchmark}".txt.xz" "models/"${benchmark} "graphs/"${benchmark}
+	sbatch --output="logs/"${benchmark}"-%j.out" --error="logs/"${benchmark}"-error-%j.out" --mem=$memoryPerJob -c 4 -q $queue train_test_one_job.sh "ChampSimTrain/"${benchmark}".txt.xz" "ChampSimTest/"${benchmark}".txt.xz" "models/"${benchmark} "graphs/"${benchmark}
 done

@@ -1,5 +1,11 @@
 #!/bin/bash
 
+#SBATCH -c 4
+
+#SBATCH --mem=8G
+
+#SBATCH --nodes=1
+
 while read -r line; do
     arr=($line)
     mkdir -p $(dirname ${arr[0]})

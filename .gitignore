@@ -21,3 +21,5 @@ graphs*/
 generateVulkanSim/
 *.pt
 *.log
+ChampSimTest/
+ChampSimTrain

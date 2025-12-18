@@ -10,9 +10,9 @@
 
 #SBATCH --output=train-all-vulkansim-%j.log
 
-memoryPerJob="100G"
+memoryPerJob="16G"
 
-queue="big"
+queue="small_gpu"
 
 for scene in BATH BUNNY CAR CHSNT CRNVL FOX FRST LANDS PARK PARTY REF ROBOT SHIP SPNZA SPRNG WKND;
 do

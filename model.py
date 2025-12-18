@@ -116,7 +116,15 @@ class MLPrefetchModel(object):
         The data is the same format given in the load traces. Namely:
         Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
         '''
-        print('Training and testing BestOffset')
+
+    @abstractmethod
+    def test(self, train_data, test_data, model_name = None, graph_name = None):
+        '''
+        Test your model here using the train data and the test data
+
+        The data is the same format given in the load traces. Namely:
+        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
+        '''
 
     @abstractmethod
     def generate(self, data):
@@ -191,6 +199,15 @@ class BestOffset(MLPrefetchModel):
         Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
         '''
         print('Training and testing BestOffset')
+    
+    def test(self, train_data, test_data, model_name = None, graph_name = None):
+        '''
+        Test your model here using the train data and the test data
+
+        The data is the same format given in the load traces. Namely:
+        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
+        '''
+        print('Testing BestOffset')
 
     def rr_hash(self, address):
         return ((address >> 6) + address) % 64
@@ -333,7 +350,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         self.model = self.model_class()
 
     def load(self, path):
-        self.model.load_state_dict(torch.load(path))
+        self.model = torch.jit.load(path)
 
     def save(self, path):
         ## torch.save(self.model.state_dict(), path)
@@ -348,7 +365,6 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         # The default batch size is 256
         if batch_size is None:
             batch_size = self.batch_size
-        
 
         bucket_data = defaultdict(list)
         bucket_instruction_ids = defaultdict(list)
@@ -448,6 +464,15 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
     def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         print('LOOKAHEAD =', self.lookahead)
         print('BUCKET =', self.bucket)
+
+        # Number of epochs without improvement before stopping
+        patience = 3
+
+        # Best value of loss during test
+        best_test_loss = float("inf")
+
+        # For how many epochs the test loss didn't improve
+        epochs_without_improvement = 0
 
         # This is the optimization function for finding the correct values for the
         # weights of the MLP
@@ -554,13 +579,158 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             total_test_loss.append(sum(test_losses))
 
             # A snapshot of the model for this epoch is saved
-            self.save(model_name+"-epoch"+str(epoch)+".pt")
+            self.save(model_name+"-epoch"+str(epoch+1)+".pt")
 
-            # Early stopping: if the last two epochs showed a decrease in test accuracy, it means
-            # that the model is suffering from overfitting
-            # if len(avg_test_accs) >= 3 and avg_test_accs[-1] < avg_test_accs[-2] and avg_test_accs[-2] < avg_test_accs[-3]:
-            #     print('EARLY STOPPED')
-            #     break
+            # Early stopping: if the test loss isn't improving, stop training
+            current_loss = sum(test_losses)
+            
+            if current_loss < best_test_loss:
+                print(f"Validation improved from {best_test_loss:.6f} to {current_loss:.6f}")
+                best_test_loss = current_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                print(f"No improvement. Patience: {epochs_without_improvement}/{patience}")
+
+            if epochs_without_improvement >= patience:
+                print("Early stopping triggered")
+                break
+    
+        # Once the model was trained and tested, the accuracies and losses are plotted
+        if graph_name is not None:
+            epochs = range(1, len(avg_train_accs) + 1)
+
+            plt.figure(figsize=(10, 5))
+
+            # Accuracy plot
+            plt.subplot(1, 2, 1)
+            plt.plot(epochs, avg_train_accs, label='Train Accuracy', marker='o')
+            plt.plot(epochs, avg_test_accs, label='Test Accuracy', marker='o')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy')
+            plt.title('Train vs Test Accuracy')
+            plt.legend()
+            plt.grid(True)
+
+            # =======================
+            # 2. Loss plot
+            # =======================
+            plt.subplot(1, 2, 2)
+            plt.plot(epochs, total_train_loss, label='Train Loss', marker='o')
+            plt.plot(epochs, total_test_loss, label='Test Loss', marker='o')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Train vs Test Loss')
+            plt.legend()
+            plt.grid(True)
+
+            plt.tight_layout()
+            
+            plt.savefig(f"{graph_name}.png", dpi=300)
+    
+    def test(self, train_data, test_data, model_name = None, graph_name = None):
+        print('LOOKAHEAD =', self.lookahead)
+        print('BUCKET =', self.bucket)
+
+        # The average accuracy for train and test in each epoch
+        avg_train_accs = []
+        avg_test_accs = []
+
+        # The loss for train and test in each epoch
+        total_train_loss = []
+        total_test_loss = []
+
+        # This is the loss function for defining how far we are from the correct output
+        # criterion = nn.CrossEntropyLoss()
+        # criterion = nn.BCELoss()
+        criterion = nn.BCEWithLogitsLoss()
+
+        # For each epoch, the model is trained with all training data and
+        # tested with all test data
+        for epoch in range(self.epochs):
+            
+            # If there is no file saved for this epoch, exit
+            if not os.path.isfile(model_name+"-epoch"+str(epoch)+".pt"):
+                break
+
+            self.load(model_name+"-epoch"+str(epoch)+".pt")
+
+            # We check if there is a GPU available
+            if torch.cuda.is_available():
+                print("Using CUDA")
+                self.model = self.model.cuda()
+                criterion = criterion.cuda()
+            else:
+                print("NOT using CUDA")
+
+            # We are no longer training: we will test in both the training data and test data
+            self.model.eval()
+            # TRAIN PART
+
+            # Accuracies
+            train_accs = []
+
+            # Calculated losses
+            train_losses = []
+
+            train_percent = len(train_data) // self.batch_size // 100
+
+            # The data is batched. For each batch...
+            for i, (instr_id, page, next_page, x_train, y_train) in enumerate(self.batch(train_data)):
+                with torch.no_grad():
+                    # prediction for training set
+                    x_train = x_train.view(-1, 64)
+                    output_train = self.model(x_train)
+
+                    # computing the training loss and accuracy
+                    loss_train = criterion(output_train, y_train)
+                    acc = self.accuracy(output_train, y_train)
+
+                    tr_loss = loss_train.item()
+                    train_accs.append(float(acc))
+                    train_losses.append(float(tr_loss))
+                    if train_percent != 0 and i % train_percent == 0:
+                        print('.', end='')
+            print()
+            print('Training accuracy {}: {}'.format(epoch, sum(train_accs) / len(train_accs)))
+            print('Training epoch : ', epoch + 1, '\t', 'training loss :', sum(train_losses))
+
+            avg_train_accs.append(sum(train_accs) / len(train_accs))
+            total_train_loss.append(sum(train_losses))
+            
+            ########################################################
+            # TEST PART
+
+            # Accuracies
+            test_accs = []
+
+            # Calculated losses
+            test_losses = []
+
+            test_percent = len(test_data) // self.batch_size // 100
+
+            # The data is batched. For each batch...
+            for i, (instr_id, page, next_page, x_test, y_test) in enumerate(self.batch(test_data)):
+                with torch.no_grad():
+                    # prediction for testing set
+                    x_test = x_test.view(-1, 64)
+                    output_test = self.model(x_test)
+
+                    # computing the testing loss and accuracy
+                    loss_test = criterion(output_test, y_test)
+                    acc = self.accuracy(output_test, y_test)
+
+                    tr_loss = loss_test.item()
+                    test_accs.append(float(acc))
+                    test_losses.append(float(tr_loss))
+                    if test_percent != 0 and i % test_percent == 0:
+                        print('.', end='')
+            print()
+            print('Test accuracy {}: {}'.format(epoch, sum(test_accs) / len(test_accs)))
+            print('Test Epoch : ', epoch + 1, '\t', 'test loss :', sum(test_losses))
+
+            avg_test_accs.append(sum(test_accs) / len(test_accs))
+            total_test_loss.append(sum(test_losses))
     
         # Once the model was trained and tested, the accuracies and losses are plotted
         if graph_name is not None:
