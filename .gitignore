@@ -18,8 +18,11 @@ ML-DPC/
 VulkanSimTest/
 VulkanSimTrain/
 graphs*/
+models*/
 generateVulkanSim/
 *.pt
 *.log
 ChampSimTest/
 ChampSimTrain
+
+.venv

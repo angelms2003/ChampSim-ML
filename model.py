@@ -335,13 +335,24 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
     degree = 2
     k = int(os.environ.get('CNN_K', '2'))
+    
+    # Instead of using hard labels and tell the prefetcher to guess
+    # the k next accesses, this allows the prefetcher to guess any of
+    # many next accesses, where the closest ones are more valuable
+    tolerance = 20
+    
     model_class = eval(os.environ.get('CNN_MODEL_CLASS', 'MLP'))
     history = int(os.environ.get('CNN_HISTORY', '4'))
     lookahead = int(os.environ.get('LOOKAHEAD', '5'))
     bucket = os.environ.get('BUCKET', 'ip')
     epochs = int(os.environ.get('EPOCHS', '30'))
     lr = float(os.environ.get('CNN_LR', '0.002'))
-    window = history + lookahead + k
+
+    # Now we want the model to guess any 2 of the accesses in
+    # the tolerance window
+    # window = history + lookahead + k
+    window = history + lookahead + k + tolerance
+
     filter_window = lookahead * degree
     next_page_table = defaultdict(dict)
     batch_size = 256
@@ -430,9 +441,10 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 # represent this information so that it makes sense to the MLP model.
                 batch_x.append(self.represent(bucket_buffer[:self.history], current_page))
 
-                # The output is created the same way, but using the two last accesses, which are the
-                # accesses to be prefetched
-                batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
+                # The output is created the same way, but using the accesses in the tolerance window,
+                # which are the accesses that should be guessed
+                #batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
+                batch_y.append(self.represent_with_tolerance(bucket_buffer[-(self.k + self.tolerance):], current_page))
 
                 # The instruction ID of this input will be the ID of the last mem access
                 batch_instr_id.append(bucket_instruction_ids[bucket_key][self.history - 1])
@@ -451,15 +463,46 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 # The batch info is cleared and we begin filling it again with new info
                 batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
 
+    # This accuracy function is too harsh. It forces the model to exactly predict the next k
+    # blocks after the lookahead blocks, but in data prefetching you should be more open-minded.
+    # A prefetched block can be useful even if it is accessed many accesses later
+    # def accuracy(self, output, label):
+    #     return torch.sum(
+    #         torch.logical_and(
+    #             torch.scatter(
+    #                 torch.zeros(output.shape, device=output.device), 1, torch.topk(output, self.k).indices, 1
+    #             ),
+    #             label
+    #         )
+    #     ) / label.shape[0] / self.k
+
+    # This functions takes an output vector directly taken from the MLP which should be
+    # of shape (N, C), where N is the batch size and C is the size of the last layer of
+    # the MLP. It alse uses a label tensor of the same shape.
     def accuracy(self, output, label):
-        return torch.sum(
-            torch.logical_and(
-                torch.scatter(
-                    torch.zeros(output.shape, device=output.device), 1, torch.topk(output, self.k).indices, 1
-                ),
-                label
-            )
-        ) / label.shape[0] / self.k
+        # Get the top k predictions for each output in the batch. Shape (N, k)
+        topk_idx = torch.topk(output, self.k).indices
+
+        # This is the total accuracy obtained by all predictions in this batch
+        total_score = 0.0
+        
+        batch_size = output.shape[0]
+
+        # For each prediction in the batch...
+        for i in range(batch_size):
+            # Count how many of the predicted blocks were useful
+            useful = 0
+            for idx in topk_idx[i]:
+                if label[i, idx] > 0:
+                    useful += 1
+
+            # This can add 0, 0.5 or 1 if k=2
+            total_score += useful / self.k
+        
+        # This will be 1 if everything was correct and 0 if everything was a disaster. But
+        # since nothing in this life is either black or white, this can also be any value
+        # between 0 and 1 depending on how the different predictions in this batch performed
+        return total_score / batch_size
 
     def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         print('LOOKAHEAD =', self.lookahead)
@@ -858,6 +901,48 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         else:
             return raw
 
+    def represent_with_tolerance(self, addresses, first_page, box=False):
+        # This function takes a list of memory accesses and returns
+        # a valid output for the MLP model, taking the tolerance into
+        # consideration
+
+        # This is a list that contains block offsets for every address
+        blocks = [(address >> 7) % 32 for address in addresses]
+
+        # This is a list that contains a page address for every address
+        pages = [(address >> 12) for address in addresses]
+
+        # This represents the output layer
+        raw = [0 for _ in range(64)]
+        
+        # For each block...
+        for i, block in enumerate(blocks):
+            # If the block is one of the k blocks after the
+            # lookahead, the weight will be 1
+            if i < self.k:
+                weight = 1.0
+            # If not, the weight will start decreasing as it gets
+            # further. I use tolerance+1 so that the last block
+            # of the tolerance window doesn't have a weight of 0
+            else:
+                weight = 1.0 - ((i-self.k+1) / (self.tolerance+1))
+            
+            # If the block is located in the current page, then add it to 
+            # the first positions of the layer. Also, always keep the highest
+            # value on each position of the layer
+            if first_page == pages[i]:
+                raw[block] = max(raw[block], weight)
+            else:
+                raw[32 + block] = max(raw[32 + block], weight)
+        
+        # Box is true when creating the input, and false when creating
+        # the output
+        if box:
+            return [raw]
+        else:
+            return raw
+
+        return raw
 
 class Hybrid(MLPrefetchModel):
 
