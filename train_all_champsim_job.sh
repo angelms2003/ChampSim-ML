@@ -14,8 +14,16 @@ memoryPerJob="16G"
 
 queue="small_gpu"
 
-for benchmark in 429.mcf-s1 433.milc-s2 462.libquantum-s0 462.libquantum-s1 473.astar-s0 605.mcf-s2 607.cactuBSSN-s2 619.lbm-s3 621.wrf-s0 623.xalancbmk-s2 bc-12 bfs-14 cc-13 pr-3 sssp-10;
+models_dir_name="models-mpmlp-tolerance-20-with-lookahead-ptt-normal-champsim"
+logs_dir_name="logs-mpmlp-tolerance-20-with-lookahead-ptt-normal-champsim"
+graphs_dir_name="graphs-mpmlp-tolerance-20-with-lookahead-ptt-normal-champsim"
+
+mkdir $models_dir_name
+mkdir $logs_dir_name
+mkdir $graphs_dir_name
+
+for scene in 429.mcf-s1 433.milc-s2 462.libquantum-s0 462.libquantum-s1 473.astar-s0 605.mcf-s2 607.cactuBSSN-s2 619.lbm-s3 621.wrf-s0 623.xalancbmk-s2 bc-12 bfs-14 cc-13 pr-3 sssp-10;
 do
-	echo "Executing sbatch train_test_one_job.sh with arguments:" --output="logs/"${benchmark}"-%j.out" --error="logs/"${benchmark}"-error-%j.out" "--mem="$memoryPerJob "-c" 4 "-q" $queue "ChampSimTrain/"${benchmark}".txt.xz" "ChampSimTest/"${benchmark}".txt.xz" "models/"${benchmark} "graphs/"${benchmark}
-	sbatch --output="logs/"${benchmark}"-%j.out" --error="logs/"${benchmark}"-error-%j.out" --mem=$memoryPerJob -c 4 -q $queue train_test_one_job.sh "ChampSimTrain/"${benchmark}".txt.xz" "ChampSimTest/"${benchmark}".txt.xz" "models/"${benchmark} "graphs/"${benchmark}
+	echo "Executing sbatch train_test_one_job.sh with arguments:" --output=${logs_dir_name}"/"${scene}"-%j.out" --error=${logs_dir_name}"/"${scene}"-error-%j.out" "--mem="$memoryPerJob "-c" 4 "-q" $queue "ChampSimTrain/"${scene}".txt.xz" "ChampSimTest/"${scene}".txt.xz" ${models_dir_name}"/"${scene} ${graphs_dir_name}"/"${scene}
+	sbatch --output=${logs_dir_name}"/"${scene}"-%j.out" --error=${logs_dir_name}"/"${scene}"-error-%j.out" --mem=$memoryPerJob -c 4 -q $queue train_test_one_job.sh "ChampSimTrain/"${scene}".txt.xz" "ChampSimTest/"${scene}".txt.xz" ${models_dir_name}"/"${scene} ${graphs_dir_name}"/"${scene}
 done

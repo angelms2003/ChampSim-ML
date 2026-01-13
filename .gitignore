@@ -12,17 +12,14 @@ obj/
 
 __pycache__
 
-logs/
-generateMPMLP/
-ML-DPC/
-VulkanSimTest/
-VulkanSimTrain/
+logs*/
 graphs*/
 models*/
-generateVulkanSim/
-*.pt
-*.log
+VulkanSimTest/
+VulkanSimTrain/
 ChampSimTest/
-ChampSimTrain
+ChampSimTrain/
+*.log
+
 
 .venv

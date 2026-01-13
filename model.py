@@ -367,7 +367,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         ## torch.save(self.model.state_dict(), path)
         self.model.eval()
 
-        example_input = torch.randn(1, 64)
+        example_input = torch.randn(1, 64).cuda()
         traced = torch.jit.trace(self.model, example_input)
         traced.save(path)
 
@@ -379,7 +379,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
         bucket_data = defaultdict(list)
         bucket_instruction_ids = defaultdict(list)
-        batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
+        batch_instr_id, batch_page, batch_next_page, batch_x, batch_y, whole_windows = [], [], [], [], [], []
 
         # Each line (each mem access of the original applicacion) is read
         for line in data:
@@ -415,24 +415,29 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             #   - Two goal mem accesses (these must be the output of the prefetcher)
             if len(bucket_buffer) >= self.window:
 
-                # The current page is the page of the latest access
-                current_page = bucket_buffer[self.history - 1] >> 12
+                # The current page is the page of the latest access in the history
+                current_page = (bucket_buffer[self.history - 1]) >> 12
                 
-                # We also record the page of the previous mem access
-                last_page = bucket_buffer[self.history - 2] >> 12
+                # We also record the page of the mem access that is right after the lookahead
+                true_next_page = (bucket_buffer[self.history + self.lookahead]) >> 12
 
-                # If these two pages are different, that means that we jumped
-                # from one page to another: we need to record it in the PTT. Maybe
-                # this should be done out of this if block?
-                if last_page != current_page:
-                    self.next_page_table[ip][last_page] = current_page
+                # According to the PTT, this is the page that should follow the current page
+                predicted_next_page = self.next_page_table[ip].get(current_page, current_page)
+
+                # If we access a new page, that means that we jumped
+                # from one page to another: we need to record it in the PTT
+                # CAREFUL: if page B follows page A, and then page A follows page A,
+                # the table is not updated with info about page A following page A (page
+                # B still follows page A)
+                if true_next_page != current_page:
+                    self.next_page_table[ip][current_page] = true_next_page
                 
-                # The page for this input will be the lastest page
-                batch_page.append(bucket_buffer[self.history - 1] >> 12)
+                # The page for this input will be the page of the latest access in the history
+                batch_page.append(current_page)
 
                 # The predicted next page will be the page according to the PTT given
                 # our current page and IP. If there is no entry, the next page is the same page
-                batch_next_page.append(self.next_page_table[ip].get(current_page, current_page))
+                batch_next_page.append(predicted_next_page)
                 
                 # TODO send transition information for labels to represent
 
@@ -444,7 +449,10 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 # The output is created the same way, but using the accesses in the tolerance window,
                 # which are the accesses that should be guessed
                 #batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
-                batch_y.append(self.represent_with_tolerance(bucket_buffer[-(self.k + self.tolerance):], current_page))
+                batch_y.append(self.represent_with_tolerance(bucket_buffer[-(self.lookahead + self.k + self.tolerance):], current_page))
+
+                # The memory addresses of every access in the window are stored for future use
+                whole_windows.append(bucket_buffer)
 
                 # The instruction ID of this input will be the ID of the last mem access
                 batch_instr_id.append(bucket_instruction_ids[bucket_key][self.history - 1])
@@ -456,12 +464,12 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             # If we already have enough info for a batch, we can use it with the MLP model
             if len(batch_x) == batch_size:
                 if torch.cuda.is_available():
-                    yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
+                    yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda(), whole_windows
                 else:
-                    yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
+                    yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x), torch.Tensor(batch_y), whole_windows
                 
                 # The batch info is cleared and we begin filling it again with new info
-                batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
+                batch_instr_id, batch_page, batch_next_page, batch_x, batch_y, whole_windows = [], [], [], [], [], []
 
     # This accuracy function is too harsh. It forces the model to exactly predict the next k
     # blocks after the lookahead blocks, but in data prefetching you should be more open-minded.
@@ -479,13 +487,16 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
     # This functions takes an output vector directly taken from the MLP which should be
     # of shape (N, C), where N is the batch size and C is the size of the last layer of
     # the MLP. It alse uses a label tensor of the same shape.
-    def accuracy(self, output, label):
+    def accuracy(self, output, label, predicted_page, whole_window):
         # Get the top k predictions for each output in the batch. Shape (N, k)
         topk_idx = torch.topk(output, self.k).indices
 
         # This is the total accuracy obtained by all predictions in this batch
         total_score = 0.0
-        
+
+        # This is the total PTT accuracy obtained by all predictions in this batch
+        ptt_score = 0.0
+
         batch_size = output.shape[0]
 
         # For each prediction in the batch...
@@ -498,11 +509,50 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # This can add 0, 0.5 or 1 if k=2
             total_score += useful / self.k
-        
+
+
+            ptt_useful = 0
+            # Count how many pages predicted by the PTT were useful
+            for idx in topk_idx[i]:
+                if idx < 32:
+                    next_page = whole_window[i][self.history-1] >> 12
+                else:
+                    next_page = predicted_page[i]
+                    idx-=32
+
+                block_offset = idx
+                
+                # if i == 0:
+                #     print("-"*30)
+                #     print(f"Predicted access to page {next_page} and block offset {idx}.")
+                #     print(f"Next {len(whole_window[i][self.history:])} accesses are:")
+                #     print(whole_window[i][self.history:])
+
+                good_access_found = False
+                
+                for access in whole_window[i][self.history:]:
+                    access_page = access >> 12
+                    access_block_offset = (access >> 7) % 32
+                    
+                    # if i == 0:
+                    #     print(f"\t- Page {access_page}, block offset {access_block_offset}.")
+
+                    if access_page == next_page and access_block_offset == block_offset:
+                        good_access_found = True
+
+                        # if i == 0:
+                        #     print(f"\t\tMATCH!")
+                
+                if good_access_found:
+                    ptt_useful+=1
+                
+            ptt_score += ptt_useful / self.k
+
+
         # This will be 1 if everything was correct and 0 if everything was a disaster. But
         # since nothing in this life is either black or white, this can also be any value
         # between 0 and 1 depending on how the different predictions in this batch performed
-        return total_score / batch_size
+        return total_score / batch_size, ptt_score / batch_size
 
     def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         print('LOOKAHEAD =', self.lookahead)
@@ -540,7 +590,9 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
         # The average accuracy for train and test in each epoch
         avg_train_accs = []
+        avg_train_ptt_accs = []
         avg_test_accs = []
+        avg_test_ptt_accs = []
 
         # The loss for train and test in each epoch
         total_train_loss = []
@@ -553,6 +605,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # Accuracies
             train_accs = []
+            train_ptt_accs = []
 
             # Calculated losses
             train_losses = []
@@ -560,8 +613,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             train_percent = len(train_data) // self.batch_size // 100
 
             # The data is batched. For each batch...
-            for i, (instr_id, page, next_page, x_train, y_train) in enumerate(self.batch(train_data)):
-
+            for i, (instr_id, page, next_page, x_train, y_train, whole_windows) in enumerate(self.batch(train_data)):
                 # clearing the Gradients of the model parameters
                 optimizer.zero_grad()
 
@@ -570,7 +622,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
                 # computing the training loss and accuracy
                 loss_train = criterion(output_train, y_train)
-                acc = self.accuracy(output_train, y_train)
+                acc, ptt_acc = self.accuracy(output_train, y_train, next_page, whole_windows)
                 # print('Acc {}: {}'.format(epoch, acc))
 
                 # computing the updated weights of all the model parameters
@@ -578,14 +630,17 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 optimizer.step()
                 tr_loss = loss_train.item()
                 train_accs.append(float(acc))
+                train_ptt_accs.append(float(ptt_acc))
                 train_losses.append(float(tr_loss))
                 if train_percent != 0 and i % train_percent == 0:
                     print('.', end='')
             print()
-            print('Training accuracy {}: {}'.format(epoch, sum(train_accs) / len(train_accs)))
+            print('Training accuracy for epoch {}: {}'.format(epoch+1, sum(train_accs) / len(train_accs)))
+            print('Training PTT accuracy for epoch {}: {}'.format(epoch+1, sum(train_ptt_accs) / len(train_ptt_accs)))
             print('Training epoch : ', epoch + 1, '\t', 'training loss :', sum(train_losses))
 
             avg_train_accs.append(sum(train_accs) / len(train_accs))
+            avg_train_ptt_accs.append(sum(train_ptt_accs) / len(train_ptt_accs))
             total_train_loss.append(sum(train_losses))
             
             ########################################################
@@ -593,6 +648,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # Accuracies
             test_accs = []
+            test_ptt_accs = []
 
             # Calculated losses
             test_losses = []
@@ -600,25 +656,28 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             test_percent = len(test_data) // self.batch_size // 100
 
             # The data is batched. For each batch...
-            for i, (instr_id, page, next_page, x_test, y_test) in enumerate(self.batch(test_data)):
+            for i, (instr_id, page, next_page, x_test, y_test, whole_windows) in enumerate(self.batch(test_data)):
                 with torch.no_grad():
                     # prediction for testing set
                     output_test = self.model(x_test)
 
                     # computing the testing loss and accuracy
                     loss_test = criterion(output_test, y_test)
-                    acc = self.accuracy(output_test, y_test)
+                    acc, ptt_acc = self.accuracy(output_test, y_test, next_page, whole_windows)
 
                     tr_loss = loss_test.item()
                     test_accs.append(float(acc))
+                    test_ptt_accs.append(float(ptt_acc))
                     test_losses.append(float(tr_loss))
                     if test_percent != 0 and i % test_percent == 0:
                         print('.', end='')
             print()
-            print('Test accuracy {}: {}'.format(epoch, sum(test_accs) / len(test_accs)))
-            print('Test Epoch : ', epoch + 1, '\t', 'test loss :', sum(test_losses))
+            print('Test accuracy for epoch {}: {}'.format(epoch+1, sum(test_accs) / len(test_accs)))
+            print('Test PTT accuracy for epoch {}: {}'.format(epoch+1, sum(test_ptt_accs) / len(test_ptt_accs)))
+            print('Test epoch : ', epoch + 1, '\t', 'test loss :', sum(test_losses))
 
             avg_test_accs.append(sum(test_accs) / len(test_accs))
+            avg_test_ptt_accs.append(sum(test_ptt_accs) / len(test_ptt_accs))
             total_test_loss.append(sum(test_losses))
 
             # A snapshot of the model for this epoch is saved
@@ -643,27 +702,43 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         if graph_name is not None:
             epochs = range(1, len(avg_train_accs) + 1)
 
-            plt.figure(figsize=(10, 5))
+            plt.figure(figsize=(22, 5))
 
-            # Accuracy plot
-            plt.subplot(1, 2, 1)
+            # 1: Accuracy plot (only offsets)
+            plt.subplot(1, 4, 1)
             plt.plot(epochs, avg_train_accs, label='Train Accuracy', marker='o')
             plt.plot(epochs, avg_test_accs, label='Test Accuracy', marker='o')
             plt.xlabel('Epoch')
             plt.ylabel('Accuracy')
-            plt.title('Train vs Test Accuracy')
+            plt.title('Train vs Test Accuracy (only offsets)')
             plt.legend()
             plt.grid(True)
 
-            # =======================
-            # 2. Loss plot
-            # =======================
-            plt.subplot(1, 2, 2)
+            # 2: Accuracy plot (offsets and PTT)
+            plt.subplot(1, 4, 2)
+            plt.plot(epochs, avg_train_ptt_accs, label='Train Accuracy', marker='o')
+            plt.plot(epochs, avg_test_ptt_accs, label='Test Accuracy', marker='o')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy')
+            plt.title('Train vs Test Accuracy (offsets and PTT)')
+            plt.legend()
+            plt.grid(True)
+
+            # 3: Loss plot (train)
+            plt.subplot(1, 4, 3)
             plt.plot(epochs, total_train_loss, label='Train Loss', marker='o')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Train Loss')
+            plt.legend()
+            plt.grid(True)
+
+            # 4: Loss plot (test)
+            plt.subplot(1, 4, 4)
             plt.plot(epochs, total_test_loss, label='Test Loss', marker='o')
             plt.xlabel('Epoch')
             plt.ylabel('Loss')
-            plt.title('Train vs Test Loss')
+            plt.title('Test Loss')
             plt.legend()
             plt.grid(True)
 
@@ -917,15 +992,21 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         
         # For each block...
         for i, block in enumerate(blocks):
+
+            # If the block is one of the lookahead blocks, give it
+            # a progressively ascending weight
+            if i < self.lookahead:
+                weight = ((i+1) / (self.lookahead+1))
+
             # If the block is one of the k blocks after the
             # lookahead, the weight will be 1
-            if i < self.k:
+            elif i < self.lookahead + self.k:
                 weight = 1.0
             # If not, the weight will start decreasing as it gets
             # further. I use tolerance+1 so that the last block
             # of the tolerance window doesn't have a weight of 0
             else:
-                weight = 1.0 - ((i-self.k+1) / (self.tolerance+1))
+                weight = 1.0 - ((i-(self.lookahead+self.k)+1) / (self.tolerance+1))
             
             # If the block is located in the current page, then add it to 
             # the first positions of the layer. Also, always keep the highest
@@ -934,7 +1015,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 raw[block] = max(raw[block], weight)
             else:
                 raw[32 + block] = max(raw[32 + block], weight)
-        
+                
         # Box is true when creating the input, and false when creating
         # the output
         if box:
