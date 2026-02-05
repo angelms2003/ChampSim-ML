@@ -5,12 +5,6 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
-import numpy as np
-
-import optuna
-import joblib
-import os
-import traceback
 
 import matplotlib.pyplot as plt
 
@@ -19,11 +13,12 @@ import matplotlib.pyplot as plt
 # accedida por la red. Con direcciones de 64 bits y bloques
 # de 128 bytes, hay un total de 2^57 páginas posibles, lo cual
 # es un número gigantesco. En vez de eso, se hace un hash con
-# la dirección de página (se divide en fragmentos de 14 bits
-# y se aplica un XOR a los fragmentos resultantes). Se pierde
-# algo de información pero merece la pena con tal de gastar
-# menos recursos
-ABS_PAGE_EMBEDDING_INPUT = 2**14
+# la dirección de página (se divide entre este tamaño
+# de input de la tabla de embedding de página). Así, se mapean
+# direcciones de página a valores entre 0 y 9999. Es
+# cierto que habrá colisiones, pero merece la pena para
+# conseguir un menor consumo de recursos
+ABS_PAGE_EMBEDDING_INPUT = 10000
 
 # El tamaño del vector de embedding de páginas absolutas.
 # Este hiperparámetro determina la riqueza de la
@@ -34,7 +29,7 @@ ABS_PAGE_EMBEDDING_OUTPUT = 24
 
 
 # El tamaño de entrada del embedding de delta de página.
-# Con un valor de 4097 se tienen:
+# Con un valor de 4097 se tiene:
 # · 2048 páginas hacia atrás [-2048,-1]
 # · 2048 páginas hacia adelante [1,2048]
 # · La página actual [0]
@@ -74,103 +69,24 @@ LSTM_HIDDEN_SIZE = 128
 # patrones más complejos
 LSTM_NUM_LAYERS = 2
 
-# The dropout probability to use in the LSTM (this will only be
-# used if there are 2 layers or more)
-LSTM_DROPOUT = 0.0
-
-
-def hash_page_xor(page_addresses:torch.LongTensor, embedding_size:int):
-    """
-        This helper function computes XOR-based hash for page addresses.
-    
-    Args:
-        page_addresses(torch.LongTensor):   Tensor with page addresses (any shape)
-        embedding_size(int):                Size of embedding table (must be power of 2)
-    
-    Returns:
-        Tensor with hashed values in range [0, embedding_size-1]
-    """
-    # Each page address will be divided in fragments of log2(embedding_size) bits.
-    # We calculate the length of these fragments
-    bits_per_fragment = int(np.log2(embedding_size))
-    
-    # By subtracting 1 we obtain a bit mask
-    mask = embedding_size - 1
-    
-    # Since memory addresses are 64 bits long and pages are 4096 bytes large,
-    # each page address is 52 bits long. Maybe it's not possible to divide
-    # each page address into an exact number of fragments, so we will have
-    # to fill the last fragment with zeros. This variable the total
-    # number of fragments that we need
-    num_fragments = (52 + bits_per_fragment - 1) // bits_per_fragment
-    
-    # This tensor will store the hashed page addresses
-    result = torch.zeros_like(page_addresses)
-    
-    # Then, we iterate through each fragment and start calculating
-    # the hash value for each address in the page_addresses tensor
-    for i in range(num_fragments):
-        shift = i * bits_per_fragment
-        fragment = (page_addresses >> shift) & mask
-        result = result ^ fragment
-    
-    # We make sure that the result is in the range [0, embedding_size-1]
-    result = result % embedding_size
-    
-    return result
-
 
 class LSTM(nn.Module):
-    def __init__(self, abs_page_embed_in:int=ABS_PAGE_EMBEDDING_INPUT, delta_page_embed_in:int=DELTA_PAGE_EMBEDDING_INPUT,
-                 page_embed_dim:int=ABS_PAGE_EMBEDDING_OUTPUT, block_embed_dim:int=BLOCK_OFFSET_EMBEDDING_OUTPUT,
-                 hidden_size:int=LSTM_HIDDEN_SIZE, num_layers:int=LSTM_NUM_LAYERS, dropout:float=LSTM_DROPOUT):
-        """
-            This is the constructor for the LSTM class
-
-            Args:
-                abs_page_embed_in (int, optional):      The input size for the absolute page embedding
-                delta_page_embed_in (int, optional):    The input size for the delta page embedding
-                page_embed_dim (int, optional):         The output size for the absolute and delta page
-                                                        embeddings
-                block_embed_dim (int, optional):        The output size for the block offset embedding
-                hidden_size (int, optional):            The size of the hidden state for the LSTM
-                num_layers (int, optional):             The number of LSTM layers
-                dropout (float, optional):              The dropout probability to use
-        """
+    def __init__(self):
         super().__init__()
-
-        # The hyperparameters are printed for debugging purposes
-        print("Initializing LSTM object with the following parameters:")
-        print(f"\t- abs_page_embed_in = {abs_page_embed_in}")
-        print(f"\t- delta_page_embed_in = {delta_page_embed_in}")
-        print(f"\t- page_embed_dim = {page_embed_dim}")
-        print(f"\t- block_embed_dim = {block_embed_dim}")
-        print(f"\t- hidden_size = {hidden_size}")
-        print(f"\t- num_layers = {num_layers}")
-        print(f"\t- dropout = {dropout}")
-
-        # The hyperparameters are stored for later
-        self.abs_page_embed_in = abs_page_embed_in
-        self.delta_page_embed_in = delta_page_embed_in
-        self.page_embed_dim = page_embed_dim
-        self.block_embed_dim = block_embed_dim
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.dropout = dropout
         
         # Tabla de embeddings para representar la primera
         # página de la secuencia de accesos (como es la
         # primera página no se puede utilizar un delta)
-        self.page_abs_embedding = nn.Embedding(abs_page_embed_in, page_embed_dim)
+        self.page_abs_embedding = nn.Embedding(ABS_PAGE_EMBEDDING_INPUT, ABS_PAGE_EMBEDDING_OUTPUT)
 
         # Tabla de embeddings para representar los deltas
         # de páginas a partir de la segunda página de la
         # secuencia de accesos
-        self.page_delta_embedding = nn.Embedding(delta_page_embed_in, page_embed_dim)  # ±2048
+        self.page_delta_embedding = nn.Embedding(DELTA_PAGE_EMBEDDING_INPUT, DELTA_PAGE_EMBEDDING_OUTPUT)  # ±2048
         
         # Tabla de embeddings para representar el offset
         # de bloque dentro de la página
-        self.block_offset_embedding = nn.Embedding(BLOCK_OFFSET_EMBEDDING_INPUT, block_embed_dim)
+        self.block_offset_embedding = nn.Embedding(BLOCK_OFFSET_EMBEDDING_INPUT, BLOCK_OFFSET_EMBEDDING_OUTPUT)
         
         # Esta es la capa LSTM que procesará las secuencias
         # de accesos
@@ -179,18 +95,18 @@ class LSTM(nn.Module):
             # temporal, donde se mezclan los valores del
             # embedding de página (absoluto o delta) y los
             # valores del embedding de offset de bloque
-            input_size=page_embed_dim + block_embed_dim,
+            input_size=ABS_PAGE_EMBEDDING_OUTPUT + BLOCK_OFFSET_EMBEDDING_OUTPUT,
 
             # Dimensión del estado oculto de la LSTM. Es el
             # vector de memoria que la LSTM mantiene mientras
             # se procesa la secuencia
-            hidden_size=hidden_size,
+            hidden_size=LSTM_HIDDEN_SIZE,
 
             # El número de capas LSTM apiladas. Las primeras
             # capas capturan patrones simples, mientras
             # que las últimas capturan patrones de mayor nivel
             # sobre los patrones capturados por las anteriores
-            num_layers=num_layers,
+            num_layers=LSTM_NUM_LAYERS,
 
             # Define el formato de los tensores de entrada/salida.
             # La forma es (batch_size, sequence_length_features).
@@ -200,22 +116,16 @@ class LSTM(nn.Module):
             # · Cada acceso tiene 36 elementos (repartidos entre
             #   elementos del embedding de delta de página y
             #   elementos del embedding de offset de bloque)
-            batch_first=True,
-
-            # Se añade dropout si hay 2 capas o más. Esto permite
-            # desactivar algunas neuronas al pasar de una capa a
-            # otra, permitiendo obtener resultados más diversos y
-            # disminuyendo el overfitting
-            dropout = dropout if num_layers > 1 else 0.0
+            batch_first=True
         )
         
         # Una capa fully connected que toma el último estado oculto
         # de la LSTM y devuelve un delta de página
-        self.fc_page_delta = nn.Linear(hidden_size, delta_page_embed_in)
+        self.fc_page_delta = nn.Linear(LSTM_HIDDEN_SIZE, DELTA_PAGE_EMBEDDING_INPUT)
 
         # Una capa fully connected que toma el último estado oculto
         # de la LSTM y devuelve un offset de bloque
-        self.fc_block = nn.Linear(hidden_size, BLOCK_OFFSET_EMBEDDING_INPUT)
+        self.fc_block = nn.Linear(LSTM_HIDDEN_SIZE, BLOCK_OFFSET_EMBEDDING_INPUT)
     
     def forward(self, sequence):
         # Esta función define el flujo hacia adelante (forward pass) de
@@ -260,8 +170,7 @@ class LSTM(nn.Module):
                 # página (0 en la tercera dimensión) de cada ejemplo del
                 # batch (dos puntos en la primera dimensión) en este paso
                 # temporal (t en la segunda dimensión)
-                page_hashes = hash_page_xor(sequence[:, t, 0], self.abs_page_embed_in)
-                page_emb = self.page_abs_embedding(page_hashes)
+                page_emb = self.page_abs_embedding(sequence[:, t, 0] % ABS_PAGE_EMBEDDING_INPUT)
             else:
                 # Si el paso temporal es 1 o más, tenemos una página
                 # anterior con la que calcular el delta. Se obtiene
@@ -335,229 +244,6 @@ class LSTM(nn.Module):
         # Se devuelven los logits de los deltas de página predichos
         # y de los offsets de bloque predichos
         return page_delta_pred, block_pred
-
-    def get_config(self):
-        """
-            Returns the model's hyperparameters as a dictionary.
-
-        Returns:
-            dict:   Dictionary where the keys are strings (the names of
-                    the hyperparameters) and they values are numbers
-                    indicating the value of each hyperparameter.
-        """
-
-        return {
-            "page_embed_dim": self.page_embed_dim,
-            "block_embed_dim": self.block_embed_dim,
-            "hidden_size": self.hidden_size,
-            "num_layers": self.num_layers,
-            "dropout": self.dropout
-        }
-    
-
-# This is the seed that Optuna will use for initializing the Tree-structured
-# Parzen Estimator
-OPTUNA_TPE_SEED = 21
-
-class OptunaHyperparameterSearch:
-    """
-        This class uses Optuna for Bayesian hyperparameter optimization.
-    """
-    
-    def __init__(self, train_data:list, test_data:list, base_output_dir:str="experiments"):
-        """
-            The class constructor. It initializes important attributes.
-
-        Args:
-            train_data (list):                  A list containing the memory accesses used
-                                                to train the model for which the hyperparameters
-                                                are being found.
-            test_data (list):                   A list containing the memory accesses used
-                                                to test the model and check if the found
-                                                hyperparameters are good.
-            base_output_dir (str, optional):    The directory where the results of each experiment
-                                                will be saved. Defaults to "experiments".
-        """
-        self.train_data = train_data
-        self.test_data = test_data
-        self.base_output_dir = base_output_dir
-        self.trial_count = 0
-    
-    def optimize(self, study_name:str, n_trials:int=50):
-        """
-            This method performs Bayesian optimization using Optuna, finding the best
-            hyperparameters
-        
-            Args:
-                study_name(str):            The name for this study.
-                n_trials(int, optional):    Number of trials to run. Defaults to 50.
-            
-            Returns:
-                A tuple containing the best parameters and the study object
-        """
-
-        # A study object is created. It will coordinate the whole optimization
-        study = optuna.create_study(
-            # We tell the study that we want to maximize the goal metric.
-            # In this case, the goal metric will be test_tolerant_acc. If we
-            # wanted to use the test loss as the goal metric, we should assign
-            # 'minimize' to direction
-            direction='maximize',
-
-            # We specify the name for the study
-            study_name=study_name,
-
-            # We initialize the Tree-structured Parzen Estimator (TPE) using the seed
-            # that we previously defined. The TPE allows the study to learn from
-            # previous trials to suggest better parameters for the next trial
-            sampler=optuna.samplers.TPESampler(seed=OPTUNA_TPE_SEED)
-        )
-        
-        # We execute the self._objetive method (defined below) n_trials times. In
-        # each trial, Optuna will suggest different hyperparameters
-        study.optimize(self._objective, n_trials=n_trials, show_progress_bar=True)
-        
-        # After the study is finished, we print the results to the screen
-        print("="*70)
-        print("OPTIMIZATION COMPLETED")
-        print("="*70)
-        print(f"\nBest trial: {study.best_trial.number}")
-        print(f"Best test tolerant accuracy: {study.best_value:.4f}")
-        print(f"Best parameters:")
-        for key, value in study.best_params.items():
-            print(f"\t{key}: {value}")
-        
-        # Then, we use joblib to save the whole study just in case we need
-        # all trials later. Before that, we need to create the base output
-        # directory just in case it doesn't exist (with exist_ok we tell
-        # the makedirs method that we don't want an exception to be thrown
-        # if the directory already exists)
-        os.makedirs(self.base_output_dir, exist_ok=True)
-        joblib.dump(study, f"{self.base_output_dir}/optuna_study.pkl")
-        
-        # Finally, we return the best hyperparameters
-        return study.best_params
-    
-    def _objective(self, trial:optuna.Trial):
-        """
-            This is the objective function for Optuna.
-        
-            Args:
-                trial(optuna.Trial):    An Optuna trial object.
-            
-            Returns:
-                Test tolerant accuracy (metric to maximize)
-        """
-
-        # The number of trials is increased by one
-        self.trial_count += 1
-        
-        # These are the hyperparameters that we will be using for the model.
-        # Each hyperparameter has a name and a list or a range of possible
-        # values to choose from
-        model_config = {
-
-            # Size for the absolute page embedding input. Optuna chooses one from the list
-            "abs_page_embed_in": trial.suggest_categorical("abs_page_embed_in", [2**10, 2**11, 2**12, 2**13, 2**14, 2**15, 2**16]),
-
-            # Size for the delta page embedding input. Optuna chooses one from the list
-            "delta_page_embed_in": trial.suggest_categorical("delta_page_embed_in", [(2**10)*2+1, (2**11)*2+1, (2**12)*2+1, (2**13)*2+1, (2**14)*2+1, (2**15)*2+1]),
-
-            # Size for the page embedding output. Optuna chooses one from the list
-            "page_embed_dim": trial.suggest_categorical("page_embed_dim", [16, 24, 32, 48, 64]),
-            
-            # Size for the block embedding output. Optuna chooses one from the list
-            "block_embed_dim": trial.suggest_categorical("block_embed_dim", [8, 12, 16, 20, 24]),
-            
-            # Size for the LSTM hidden size. Optuna chooses one from the list
-            "hidden_size": trial.suggest_categorical("hidden_size", [64, 96, 128, 192, 256]),
-            
-            # Number of layers for the LSTM. Optuna chooses one integer in the
-            # range [1,3]
-            "num_layers": trial.suggest_int("num_layers", 1, 3),
-
-            # Dropout rate to use when num_layers is more than 1. Optuna chooses
-            # a random float in the range [0.0,0.3]
-            "dropout": trial.suggest_float("dropout", 0.0, 0.3),
-        }
-
-        # This is similar to the previous dictionary, but it only contains
-        # hyperparameters that are relevant for training
-        training_config = {
-            # Learning rate to use during training. Optuna chooses one float in the
-            # range [0.0001,0.01]
-            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2),
-
-            # Number of previous accesses to use for the history. Optuna chooses one
-            # integer in the range [3,6]
-            "history_size": trial.suggest_int("history_size", 3, 6),
-
-            # Number of accesses to skip in order to avoid prefetching too early.
-            # Optuna chooses one integer in the range [3,7]
-            "lookahead_size": trial.suggest_int("lookahead_size", 3, 7),
-
-            # Number of training examples in one batch. Optuna chooses one
-            # from the list
-            "batch_size": trial.suggest_categorical("batch_size", [128, 256, 512]),
-
-            # Number of training epochs. They are fixed to 10 to speed up
-            # trials, but will surely be larger during training once the best
-            # hyperparameters have been found
-            "num_epochs": 10
-        }
-        
-        # For each trial, we print the chosen hyperparameters
-        print(f"\nTrial {self.trial_count}")
-        print("Model architecture:")
-        for key, value in model_config.items():
-            print(f"  {key}: {value}")
-        print("Training configuration:")
-        for key, value in training_config.items():
-            print(f"  {key}: {value}")
-        
-        try:
-            # The model is created, and the model configuration is
-            # specified as a parameter to the constructor
-            prefetcher = LSTMBasedPrefetcher(model_config)
-
-            # The training configuration is set to the values chosen
-            # by Optuna
-            prefetcher.set_training_config(training_config)
-            
-            # We set the path where the model will be saved and create the
-            # directory where it will be located
-            #experiment_name = f"trial_{self.trial_count:03d}"
-            #model_path = f"{self.base_output_dir}/{experiment_name}/model"
-            #os.makedirs(f"{self.base_output_dir}/{experiment_name}", exist_ok=True)
-            
-            # We train and test the model. We set graph_name to None to
-            # avoid saving graphs for trials
-            metrics = prefetcher.train_and_test(
-                self.train_data,
-                self.test_data,
-                model_name=None,#model_path,
-                graph_name=None
-            )
-            
-            # After finishing the training and testing, we obtain the value
-            # for the tolerant accuracy during test (the metric to maximize)
-            test_tolerant_acc = metrics["test_tolerant_acc"]
-            print(f"Result: {test_tolerant_acc:.4f}")
-            
-            # We report the metric of this trial to Optuna, which uses it
-            # for pruning (i.e., stopping the current trial if the model
-            # is not working well)
-            trial.report(test_tolerant_acc, step=0)
-            
-            # Finally, we return the recorded metric
-            return test_tolerant_acc
-
-        # If any exception occurred, we return the worst possible metric (in
-        # this case, 0 is the worst tolerant accuracy)          
-        except Exception as e:
-            print(f"ERROR: {str(e)}")
-            traceback.print_exc()
-            return 0.0
 
 class MLPrefetchModel(object):
     '''
@@ -650,54 +336,11 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
     # The learning rate for the LSTM
     LEARNING_RATE = 0.002
 
-    def __init__(self, model_config:dict=None):
+    def __init__(self):
         """
-            Constructor for the LSTMBasedPrefetcher class.
-
-        Args:
-            model_config (dict, optional):  A dictionary where the keys are strings (
-                                            the names of the hyperparameters) and the
-                                            values are numbers indicating (the value of
-                                            each hyperparameter). See LSTM.get_config()
-                                            for more details.
+            Constructor for the LSTMBasedPrefetcher class
         """
-
-        # If no configuration was provided, the model is initialized
-        # using the default values
-        if model_config is None:
-            self.model = LSTM()
-        else:
-            self.model = LSTM(**model_config)
-    
-    def set_training_config(self, config:dict):
-        """
-            Allows to change the default training configuration.
-
-        Args:
-            config (dict):  Dictionary where the keys are strings (the names of the
-                            hyperparameters) and the values are numbers indicating
-                            the value of each hyperparameter. An example for this
-                            dictionary is the following:
-                            {
-                                "history_size": 5,
-                                "lookahead_size": 7,
-                                "learning_rate": 0.001,
-                                "num_epochs": 20,
-                                "batch_size": 512
-                            }
-        """
-        # It's important to check if each hyperparameter is present in
-        # the dictionary before using it
-        if "history_size" in config:
-            self.HISTORY_SIZE = config["history_size"]
-        if "lookahead_size" in config:
-            self.LOOKAHEAD_SIZE = config["lookahead_size"]
-        if "learning_rate" in config:
-            self.LEARNING_RATE = config["learning_rate"]
-        if "num_epochs" in config:
-            self.NUM_EPOCHS = config["num_epochs"]
-        if "batch_size" in config:
-            self.BATCH_SIZE = config["batch_size"]
+        self.model = LSTM()
 
     def load(self, path:str):
         """
@@ -732,25 +375,24 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         try:
             scripted = torch.jit.script(self.model)
             scripted.save(path)
-            print(f"Model successfully saved using torch.jit.script to {path}")
         except Exception as e:
-            print(f"torch.jit.scrip failed: {e}")
-            print("Trying to save using torch.jit.trace instead")
+            print(f"Script failed: {e}")
+            print("Trying to save using trace instead")
             
             # Option B: if torch.jit.script fails, we will try to use
             # torch.jit.trace. This function needs an example input, so
-            # we will have to manually create it. For simplicity, we will
+            # we will have to cook some inputs. For simplicity, we will
             # assume a batch size of 1
 
             # The example_pages tensor will be a (1, HISTORY_SIZE) tensor
             # where each element represents the page address of an access in
             # the sequence
-            example_pages = torch.randint(0, self.model.abs_page_embed_in, (1, self.HISTORY_SIZE))
+            example_pages = torch.randint(0, 10000, (1, self.HISTORY_SIZE))
 
             # The example_blocks tensor will be a (1, HISTORY_SIZE) tensor
             # where each element represents the block offset of an access
             # in the sequence
-            example_blocks = torch.randint(0, BLOCK_OFFSET_EMBEDDING_INPUT, (1, self.HISTORY_SIZE))
+            example_blocks = torch.randint(0, 32, (1, self.HISTORY_SIZE))
 
             # If cuda is available, the tensors are moved to the GPU 
             if torch.cuda.is_available():
@@ -763,7 +405,6 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             # The input is used to save the model via the trace function
             traced = torch.jit.trace(self.model, example_input)
             traced.save(path)
-            print(f"Model successfully saved using torch.jit.trace to {path}")
 
     def batch(self, data:list, batch_size:int=None):
         """
@@ -808,8 +449,8 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         # accuracy
         batch_whole_windows = []
         
-        # Total window size: history + lookahead + tolerance window
-        window_size = self.HISTORY_SIZE + self.LOOKAHEAD_SIZE + self.TOLERANCE_SIZE
+        # Total window size: history + lookahead + 1 target block
+        window_size = self.HISTORY_SIZE + self.LOOKAHEAD_SIZE + 1
         
         # Each line (each mem access) is read
         for line in data:
@@ -950,12 +591,10 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                                 etc.
             graph_name (str):   Path to save training graphs
         """
-        print(f"Called train_and_test method. Training with the following hyperparameters:")
-        print(f"\t- LEARNING_RATE = {self.LEARNING_RATE}")
-        print(f"\t- HISTORY_SIZE = {self.HISTORY_SIZE}")
-        print(f"\t- LOOKAHEAD_SIZE = {self.LOOKAHEAD_SIZE}")
-        print(f"\t- BATCH_SIZE = {self.BATCH_SIZE}")
-        print(f"\t- NUM_EPOCHS = {self.NUM_EPOCHS}")
+        print(f'Called train_and_test method.')
+
+        print(f'HISTORY_SIZE = {self.HISTORY_SIZE}')
+        print(f'LOOKAHEAD_SIZE = {self.LOOKAHEAD_SIZE}')
 
         # If the model's loss during test doesn't improve for 3 epochs,
         # training ends to avoid overfitting
@@ -1197,19 +836,6 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                 total_test_loss,
                 graph_name
             )
-        
-        # ============================================================
-        # RETURN METRICS
-        # ============================================================
-        return {
-            'train_strict_acc': avg_train_strict_accs[-1] if avg_train_strict_accs else 0,
-            'train_tolerant_acc': avg_train_tolerant_accs[-1] if avg_train_tolerant_accs else 0,
-            'test_strict_acc': avg_test_strict_accs[-1] if avg_test_strict_accs else 0,
-            'test_tolerant_acc': avg_test_tolerant_accs[-1] if avg_test_tolerant_accs else 0,
-            'train_loss': total_train_loss[-1] if total_train_loss else float('inf'),
-            'test_loss': total_test_loss[-1] if total_test_loss else float('inf'),
-            'epochs_trained': len(avg_train_strict_accs)
-        }
 
     def _plot_training_results(self, avg_train_strict_accs, avg_train_tolerant_accs,
                                avg_test_strict_accs, avg_test_tolerant_accs,

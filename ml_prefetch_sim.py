@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import argparse
 import os
 import sys
@@ -26,15 +24,18 @@ help_str = {
 'help': '''usage: {prog} command [<args>]
 
 Available commands:
-    build            Builds base and prefetcher ChampSim binaries
-    run              Runs ChampSim on specified traces
-    eval             Parses and computes metrics on simulation results
-    train            Trains your model
-    train_and_test   Trains your model and tests it to check for overfitting
-    test             Tests your model in all trained epochs to check for overfitting
-    generate         Generates the prefetch file
-    help             Displays this help message. Command-specific help messages
-                     can be displayed with `{prog} help command`
+    build                   Builds base and prefetcher ChampSim binaries
+    run                     Runs ChampSim on specified traces
+    eval                    Parses and computes metrics on simulation results
+    train                   Trains your model
+    train_and_test          Trains your model and tests it to check for overfitting
+    optuna_train_and_test   Finds the best combination of hyperparameters for the model
+                            using Optuna, then trains the best model and tests it to
+                            check for overfitting
+    test                    Tests your model in all trained epochs to check for overfitting
+    generate                Generates the prefetch file
+    help                    Displays this help message. Command-specific help messages
+                            can be displayed with `{prog} help command`
 '''.format(prog=sys.argv[0]),
 
 'build': '''usage: {prog} build [<target>]
@@ -157,7 +158,31 @@ Options:
         this location. The extension will automatically be set to .png, so it's not
         necessary to specify it.
 
-'''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
+'''.format(prog=sys.argv[0]),
+
+'optuna_train_and_test': '''usage: {prog} optuna_train_and_test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>] [--experiments-dir <experiments-dir-path]
+
+Description:
+    {prog} optuna_train_and_test <train-load-trace> <test-load-trace>
+        Trains your model on the given train load trace and tests it on the
+        given test trace
+
+Options:
+    --model-name <model-path>
+        Saves a model for each epoch to this location. If not specified, the
+        trained model is not saved and is lost forever. The extension will
+        automatically be set to .pt, so it's not necessary to specify it.
+    --graph-name <graph-path>
+        Saves a graph with the accuracy and loss values for training and test to
+        this location. The extension will automatically be set to .png, so it's not
+        necessary to specify it.
+    --experiments-dir <experiments-dir-path>
+        Saves info about the experiments performed by Optuna to find the best
+        combination of hyperparameters during the creation of the model and
+        its training. It must be a directory, and if it doesn't exist, it will
+        be automatically created.
+
+'''.format(prog=sys.argv[0]),
 
 'test': '''usage: {prog} test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>]
 
@@ -490,6 +515,63 @@ def train_and_test_command():
 
     model.train_and_test(train_data, test_data, args.model_name, args.graph_name)
 
+def optuna_train_and_test_command():
+    if len(sys.argv) < 3:
+        print(help_str['optuna_train_and_test'])
+        exit(-1)
+    # 'optuna_train_and_test': '''usage: {prog} optuna_train_and_test <train-load-trace> <test-load-trace> [--model-name <model-path>] [--graph-name <graph-path>] [--experiments-dir <experiments-dir-path]
+
+    parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
+    parser.add_argument('train_load_trace', default=None)
+    parser.add_argument('test_load_trace', default=None)
+    parser.add_argument('--model-name', default=None)
+    parser.add_argument('--graph-name', default=None)
+    parser.add_argument('--experiments-dir', default=None)
+
+    args = parser.parse_args(sys.argv[2:])
+
+    train_data, unused = read_load_trace_data(args.train_load_trace)
+    test_data, unused = read_load_trace_data(args.test_load_trace)
+
+    print("Traning data size:",len(train_data))
+    print("Test data size:",len(test_data))
+
+    from model import OptunaHyperparameterSearch
+    # The Optuna optimizer is created
+    optimizer = OptunaHyperparameterSearch(train_data, test_data, args.experiments_dir)
+
+    # The optimization is executed and the best parameters are
+    # found. The optimization is run for 50 trials
+    study_name = args.model_name.split("/")[-1]
+    best_params = optimizer.optimize(study_name, n_trials=50)
+
+    # After finding the best parameters (located in best_params)
+    # we can create the final model
+    model_params = {
+        "page_embed_dim": best_params["page_embed_dim"],
+        "block_embed_dim": best_params["block_embed_dim"],
+        "hidden_size": best_params["hidden_size"],
+        "num_layers": best_params["num_layers"],
+        "dropout": best_params["dropout"]
+    }
+    
+    training_params = {
+        "learning_rate": best_params["learning_rate"],
+        "history_size": best_params["history_size"],
+        "lookahead_size": best_params["lookahead_size"],
+        "batch_size": best_params["batch_size"]
+    }
+
+    final_prefetcher = Model(model_config=model_params)
+    final_prefetcher.set_training_config(training_params)
+
+    final_prefetcher.train_and_test(
+        train_data,
+        test_data,
+        args.model_name,
+        args.graph_name
+    )
+
 def test_command():
     if len(sys.argv) < 3:
         print(help_str['test'])
@@ -553,6 +635,7 @@ commands = {
     'eval': eval_command,
     'train': train_command,
     'train_and_test': train_and_test_command,
+    'optuna_train_and_test': optuna_train_and_test_command,
     'test': test_command,
     'generate': generate_command,
     'help': help_command,

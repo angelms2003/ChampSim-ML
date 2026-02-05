@@ -14,9 +14,9 @@ memoryPerJob="16G"
 
 queue="small_gpu"
 
-models_dir_name="models-mpmlp-tolerance-20-with-lookahead-ptt-normal-vulkansim"
-logs_dir_name="logs-mpmlp-tolerance-20-with-lookahead-ptt-normal-vulkansim"
-graphs_dir_name="graphs-mpmlp-tolerance-20-with-lookahead-ptt-normal-vulkansim"
+models_dir_name="models-lstm-tolerance-20-with-lookahead-vulkansim"
+logs_dir_name="logs-lstm-tolerance-20-with-lookahead-vulkansim"
+graphs_dir_name="graphs-lstm-tolerance-20-with-lookahead-vulkansim"
 
 mkdir $models_dir_name
 mkdir $logs_dir_name
