@@ -15,11 +15,11 @@ __pycache__
 logs*/
 graphs*/
 models*/
-VulkanSimTest/
-VulkanSimTrain/
+experiments*/
+VulkanSimTest*/
+VulkanSimTrain*/
 ChampSimTest/
 ChampSimTrain/
 *.log
-
 
 .venv

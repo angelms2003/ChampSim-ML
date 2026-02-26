@@ -431,7 +431,10 @@ def read_load_trace_data(load_trace, num_prefetch_warmup_instructions = 99999999
     
     def process_line(line):
         split = line.strip().split(', ')
-        return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), split[4] == '1'
+        if len(split) == 5:
+            return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), split[4] == '1'
+        elif len(split) == 6:
+            return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), int(split[4], 16), split[5] == '1'
 
     train_data = []
     eval_data = []
@@ -557,7 +560,6 @@ def optuna_train_and_test_command():
     
     training_params = {
         "learning_rate": best_params["learning_rate"],
-        "history_size": best_params["history_size"],
         "lookahead_size": best_params["lookahead_size"],
         "batch_size": best_params["batch_size"]
     }

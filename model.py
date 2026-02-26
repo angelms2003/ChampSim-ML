@@ -1,11 +1,13 @@
-# LSTM-Based Prefetcher
+# LSTM-Based Prefetcher (model-lstm-delta-stateful-thread-id-optuna)
+# Implementación de LSTM stateful usando TBPTT (Truncated Backpropagation
+# Through Time) para poder mantener la historia de todos los accesos vistos
 
 from abc import abstractmethod
 from collections import defaultdict
 
 import torch
 import torch.nn as nn
-import numpy as np
+import sys
 
 import optuna
 import joblib
@@ -14,41 +16,17 @@ import traceback
 
 import matplotlib.pyplot as plt
 
-# El tamaño de entrada para el embedding de página
-# absoluta utilizado para representar la primera página
-# accedida por la red. Con direcciones de 64 bits y bloques
-# de 128 bytes, hay un total de 2^57 páginas posibles, lo cual
-# es un número gigantesco. En vez de eso, se hace un hash con
-# la dirección de página (se divide en fragmentos de 14 bits
-# y se aplica un XOR a los fragmentos resultantes). Se pierde
-# algo de información pero merece la pena con tal de gastar
-# menos recursos
-ABS_PAGE_EMBEDDING_INPUT = 2**14
-
-# El tamaño del vector de embedding de páginas absolutas.
-# Este hiperparámetro determina la riqueza de la
-# representación. Cuanto más grande sea el vector de
-# embedding, más capacidad de expresión se obtendrá, pero
-# también se complicará más la arquitectura de la red
-ABS_PAGE_EMBEDDING_OUTPUT = 24
-
-
 # El tamaño de entrada del embedding de delta de página.
 # Con un valor de 4097 se tienen:
 # · 2048 páginas hacia atrás [-2048,-1]
 # · 2048 páginas hacia adelante [1,2048]
 # · La página actual [0]
 # En caso de que el delta sea más grande, se tendrá que
-# hacer un clamp (llevarlo a -2048 o 2048). El tamaño de
-# entrada es menor que en las páginas absolutas porque los
-# deltas son más simples
+# hacer un clamp (llevarlo a -2048 o 2048)
 DELTA_PAGE_EMBEDDING_INPUT = 4097
 
-# El tamaño del vector de embedding de delta de página. Debe
-# ser igual al tamaño del vector de embedding de páginas
-# absolutas, pues la entrada de la LSTM debe medir lo mismo
-# independientemente de si es el primer acceso o no
-DELTA_PAGE_EMBEDDING_OUTPUT = ABS_PAGE_EMBEDDING_OUTPUT
+# El tamaño del vector de embedding de delta de página
+DELTA_PAGE_EMBEDDING_OUTPUT = 24
 
 
 # El tamaño de entrada del embedding de offset de bloque.
@@ -79,59 +57,20 @@ LSTM_NUM_LAYERS = 2
 LSTM_DROPOUT = 0.0
 
 
-def hash_page_xor(page_addresses:torch.LongTensor, embedding_size:int):
-    """
-        This helper function computes XOR-based hash for page addresses.
-    
-    Args:
-        page_addresses(torch.LongTensor):   Tensor with page addresses (any shape)
-        embedding_size(int):                Size of embedding table (must be power of 2)
-    
-    Returns:
-        Tensor with hashed values in range [0, embedding_size-1]
-    """
-    # Each page address will be divided in fragments of log2(embedding_size) bits.
-    # We calculate the length of these fragments
-    bits_per_fragment = int(np.log2(embedding_size))
-    
-    # By subtracting 1 we obtain a bit mask
-    mask = embedding_size - 1
-    
-    # Since memory addresses are 64 bits long and pages are 4096 bytes large,
-    # each page address is 52 bits long. Maybe it's not possible to divide
-    # each page address into an exact number of fragments, so we will have
-    # to fill the last fragment with zeros. This variable the total
-    # number of fragments that we need
-    num_fragments = (52 + bits_per_fragment - 1) // bits_per_fragment
-    
-    # This tensor will store the hashed page addresses
-    result = torch.zeros_like(page_addresses)
-    
-    # Then, we iterate through each fragment and start calculating
-    # the hash value for each address in the page_addresses tensor
-    for i in range(num_fragments):
-        shift = i * bits_per_fragment
-        fragment = (page_addresses >> shift) & mask
-        result = result ^ fragment
-    
-    # We make sure that the result is in the range [0, embedding_size-1]
-    result = result % embedding_size
-    
-    return result
-
-
 class LSTM(nn.Module):
-    def __init__(self, abs_page_embed_in:int=ABS_PAGE_EMBEDDING_INPUT, delta_page_embed_in:int=DELTA_PAGE_EMBEDDING_INPUT,
-                 page_embed_dim:int=ABS_PAGE_EMBEDDING_OUTPUT, block_embed_dim:int=BLOCK_OFFSET_EMBEDDING_OUTPUT,
-                 hidden_size:int=LSTM_HIDDEN_SIZE, num_layers:int=LSTM_NUM_LAYERS, dropout:float=LSTM_DROPOUT):
+    def __init__(self,
+                 delta_page_embed_in:int=DELTA_PAGE_EMBEDDING_INPUT,
+                 page_embed_dim:int=DELTA_PAGE_EMBEDDING_OUTPUT,
+                 block_embed_dim:int=BLOCK_OFFSET_EMBEDDING_OUTPUT,
+                 hidden_size:int=LSTM_HIDDEN_SIZE,
+                 num_layers:int=LSTM_NUM_LAYERS,
+                 dropout:float=LSTM_DROPOUT):
         """
             This is the constructor for the LSTM class
 
             Args:
-                abs_page_embed_in (int, optional):      The input size for the absolute page embedding
                 delta_page_embed_in (int, optional):    The input size for the delta page embedding
-                page_embed_dim (int, optional):         The output size for the absolute and delta page
-                                                        embeddings
+                page_embed_dim (int, optional):         The output size for the delta page embeddings
                 block_embed_dim (int, optional):        The output size for the block offset embedding
                 hidden_size (int, optional):            The size of the hidden state for the LSTM
                 num_layers (int, optional):             The number of LSTM layers
@@ -141,7 +80,6 @@ class LSTM(nn.Module):
 
         # The hyperparameters are printed for debugging purposes
         print("Initializing LSTM object with the following parameters:")
-        print(f"\t- abs_page_embed_in = {abs_page_embed_in}")
         print(f"\t- delta_page_embed_in = {delta_page_embed_in}")
         print(f"\t- page_embed_dim = {page_embed_dim}")
         print(f"\t- block_embed_dim = {block_embed_dim}")
@@ -150,18 +88,12 @@ class LSTM(nn.Module):
         print(f"\t- dropout = {dropout}")
 
         # The hyperparameters are stored for later
-        self.abs_page_embed_in = abs_page_embed_in
         self.delta_page_embed_in = delta_page_embed_in
         self.page_embed_dim = page_embed_dim
         self.block_embed_dim = block_embed_dim
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.dropout = dropout
-        
-        # Tabla de embeddings para representar la primera
-        # página de la secuencia de accesos (como es la
-        # primera página no se puede utilizar un delta)
-        self.page_abs_embedding = nn.Embedding(abs_page_embed_in, page_embed_dim)
 
         # Tabla de embeddings para representar los deltas
         # de páginas a partir de la segunda página de la
@@ -177,7 +109,7 @@ class LSTM(nn.Module):
         self.lstm = nn.LSTM(
             # El tamaño del vector de entrada en cada paso
             # temporal, donde se mezclan los valores del
-            # embedding de página (absoluto o delta) y los
+            # embedding de delta de página y los
             # valores del embedding de offset de bloque
             input_size=page_embed_dim + block_embed_dim,
 
@@ -216,125 +148,170 @@ class LSTM(nn.Module):
         # Una capa fully connected que toma el último estado oculto
         # de la LSTM y devuelve un offset de bloque
         self.fc_block = nn.Linear(hidden_size, BLOCK_OFFSET_EMBEDDING_INPUT)
+
+        # A dictionary that saves the state of the model for each different
+        # thread ID, since different threads will have different memory
+        # access patterns, and mixing them will only confuse the model
+        self.states = dict()
     
-    def forward(self, sequence):
-        # Esta función define el flujo hacia adelante (forward pass) de
-        # los datos a través de la red neuronal. El parámetro sequence
-        # contiene el input que se va a procesar, el cual tiene un
-        # tamaño de (batch, seq_len, 2):
-        # · batch es el batch_size (tamaño de batch).
-        # · seq_len es la longitud de la secuencia de accesos a memoria.
-        # · Cada ejemplo tiene 2 datos (dirección de página y offset de
-        #   bloque).
-        # Un ejemplo concreto de entrada de tamaño (2,4,2) podría ser
-        # el siguiente:
-        # 
-        # sequence = torch.tensor([
-        #     # Secuencia 1:
-        #     [[1000, 5],   # Acceso 1: página 1000, bloque 5
-        #     [1000, 6],   # Acceso 2: página 1000, bloque 6
-        #     [1001, 0],   # Acceso 3: página 1001, bloque 0
-        #     [1001, 2]],  # Acceso 4: página 1001, bloque 2
-        #
-        #     # Secuencia 2:
-        #     [[5234, 10],  # Acceso 1: página 5234, bloque 10
-        #     [5234, 11],  # Acceso 2: página 5234, bloque 11
-        #     [5240, 0],   # Acceso 3: página 5240, bloque 0
-        #     [5240, 1]]   # Acceso 4: página 5240, bloque 1
-        # ])
+    def forward_sequence(self,
+                         sequence:torch.Tensor,
+                         thread_id:int,
+                         prev_state:tuple=None):
+        """
+            This method defines the forward pass of data through the model.
+            It processes a whole sequence of accesses for a given thread ID.
         
-        # En esta lista inicialmente vacía se van a almacenar los embeddings
-        # de cada paso temporal. Se irá añadiendo un elemento por cada paso
-        # "t" en la secuencia. Al final se tendrán seq_len elementos en
-        # esta lista.
-        embedded = []
+        Args:
+            sequence (torch.Tensor):    A tensor of shape (seq_len, 2), where seq_len
+                                        is the length of the sequence, and 2 means that,
+                                        for each element, the page address and the block
+                                        offset are given
 
-        # Se itera por cada paso temporal en la secuencia. Esto se hace así
-        # para poder calcular los deltas de página correctamente (o, en caso
-        # de la primera página, para calcular la dirección absoluta de página)
-        for t in range(sequence.shape[1]):
-            # Si estamos en el primer paso temporal, solo se tiene en cuenta
-            # la dirección de la página de este acceso
-            if t == 0:
-                # Se calcula el embedding de página dada la dirección de
-                # página (0 en la tercera dimensión) de cada ejemplo del
-                # batch (dos puntos en la primera dimensión) en este paso
-                # temporal (t en la segunda dimensión)
-                page_hashes = hash_page_xor(sequence[:, t, 0], self.abs_page_embed_in)
-                page_emb = self.page_abs_embedding(page_hashes)
-            else:
-                # Si el paso temporal es 1 o más, tenemos una página
-                # anterior con la que calcular el delta. Se obtiene
-                # el valor del delta para cada ejemplo del batch
-                # calculando la diferencia entre la dirección de página
-                # de este acceso y la dirección de página del acceso
-                # anterior
-                delta = sequence[:, t, 0] - sequence[:, t-1, 0]
+            thread_id (int):            The ID of the thread that requested the memory
+                                        accesses in the sequence
 
-                # En caso de que el delta sea muy grande, se clampea
-                # (es decir, se trae al límite más cercano)
-                max_value_delta = (DELTA_PAGE_EMBEDDING_INPUT-1)//2
-                delta_clamped = torch.clamp(delta, -max_value_delta, max_value_delta) + max_value_delta
+            prev_state (tuple):         The previous state for this thread ID. If this is
+                                        the first sequence for this thread ID, prev_state
+                                        should be None
 
-                # En base al valor de delta obtenido se calcula el
-                # valor de embedding
-                page_emb = self.page_delta_embedding(delta_clamped)
+        Returns:
+            predictions:    List of tuples, where each tuple contains the page delta
+                            logits and the block logits
             
-            # Una vez calculado el embedding correspondiente a la página,
-            # se calcula el embedding correspondiente al bloque. En este
-            # caso se hace igual en todos los pasos temporales
-            block_emb = self.block_offset_embedding(sequence[:, t, 1])
+            final_state:    Tuple with the hidden state, cell state and last page of
+                            the sequence, allowing the state to be reused for the next
+                            sequence of the same thread ID
+        """
 
-            # Se almacena en la lista de embeddings los embeddings de página
-            # y de bloque obtenidos en este paso temporal para todos los
-            # ejemplos de este batch. page_emb es de tamaño (batch_size,ABS_PAGE_EMBEDDING_OUTPUT),
-            # y block_emb es de tamaño (batch_size,BLOCK_OFFSET_EMBEDDING_OUTPUT). Al usar dim=-1 se
-            # concatenan ambos tensores de embeddings por la última
-            # dimensión, dando lugar a un tensor de embeddings de tamaño
-            # (batch_size,ABS_PAGE_EMBEDDING_OUTPUT+BLOCK_OFFSET_EMBEDDING_OUTPUT),
-            # donde cada fila representa el input del paso temporal actual
-            embedded.append(torch.cat([page_emb, block_emb], dim=-1))
-        
-        # Los tensores de embedding se convierten a un único tensor 3D por
-        # la dimensión 1 (la dimensión temporal). De esta forma, se pasa de
-        # tener varios tensores (batch_size, ABS_PAGE_EMBEDDING_OUTPUT+BLOCK_OFFSET_EMBEDDING_OUTPUT) a un tensor de
-        # tamaño (batch_size, seq_len, ABS_PAGE_EMBEDDING_OUTPUT+BLOCK_OFFSET_EMBEDDING_OUTPUT)
-        embedded = torch.stack(embedded, dim=1)
-        
-        # Se llama a la LSTM con el batch de embeddings. La entrada es el tensor
-        # 3D embedded, de tamaño (batch_size, seq_len, ABS_PAGE_EMBEDDING_OUTPUT+BLOCK_OFFSET_EMBEDDING_OUTPUT). El output son dos
-        # elementos:
-        # · lstm_out es un tensor de tamaño (batch_size, seq_len, hidden_size) que
-        #   contiene la salida del estado oculto en cada paso temporal.
-        # · _ es una dupla con los estados finales (hidden y cell). En este caso
-        #   no hacen falta, así que se descartan.
-        lstm_out, _ = self.lstm(embedded)
+        # The device where the model is located is obtained. This will help
+        # put all tensors on the same device
+        device = next(self.parameters()).device
 
-        # Solo necesitamos el estado oculto del último paso temporal en cada
-        # ejemplo del batch:
-        # · Con los primeros dos puntos indicamos que queremos los estados
-        #   ocultos de todos los ejemplos del batch
-        # · Con el -1 indicamos que solo queremos el estado oculto del último
-        #   paso temporal, que es el que usaremos para hacer la predicción
-        # · Con los dos puntos del final indicamos que queremos todos los
-        #   elementos del estado oculto (los hidden_size elementos)
-        final_state = lstm_out[:, -1, :]
-        
-        # Utilizamos la capa fully connected que predice el delta de
-        # la siguiente página a predecir. El input es un final_state
-        # de tamaño (batch_size, hidden_state) y la salida son unos
-        # logits de tamaño (batch_size, DELTA_PAGE_EMBEDDING_INPUT),
-        # donde cada entrada es un logit para un posible delta
-        page_delta_pred = self.fc_page_delta(final_state)
+        # The length of the sequence
+        seq_len = sequence.shape[0]
 
-        # Lo mismo con la capa fully connected que predice el offset
-        # de bloque. El tamaño de input es el mismo: (batch_size, hidden_state),
-        # pero en este caso el tamaño de output es (batch_size, BLOCK_OFFSET_EMBEDDING_INPUT)
-        block_pred = self.fc_block(final_state)
+        # Initialize a new state or use previous state
+        if prev_state is None:
+            hidden = torch.zeros(self.num_layers, 1, self.hidden_size, device=device)
+            cell = torch.zeros(self.num_layers, 1, self.hidden_size, device=device)
+            last_page = None
+        else:
+            hidden, cell, last_page = prev_state
         
-        # Se devuelven los logits de los deltas de página predichos
-        # y de los offsets de bloque predichos
-        return page_delta_pred, block_pred
+        # Here we will store the embeddings for each input
+        embedded_inputs = []
+
+        # Here we will store the predicted page deltas and block offsets for
+        # each input
+        predictions = []
+
+        # The embeddings are prepared for the whole sequence
+        for t in range(seq_len):
+            # The page address and the block offset are obtained
+            page = sequence[t, 0].to(device)
+            block = sequence[t, 1].to(device)
+
+            # The delta with respect to the previous page is calculated
+            if last_page is not None:
+                delta = (page - last_page)
+            else:
+                delta = torch.tensor(0, dtype=torch.long, device=device)
+            
+            # The delta is clamped to the given limits. The variable
+            # max_value_delta stores the maximum absolute value for a delta
+            max_value_delta = (self.delta_page_embed_in - 1) // 2
+            delta_clamped = torch.clamp(delta, -max_value_delta, max_value_delta)
+
+            # Once the delta is clamped, the index is calculated (the model can't
+            # be fed a negative value for the delta, so the range [-2048,2048], for
+            # example, is transformed into the range [0, 4096], where the index 0
+            # represents a delta of -2048)
+            delta_index = delta_clamped + max_value_delta
+            delta_index = torch.clamp(delta_index, 0, self.delta_page_embed_in - 1)
+
+            # Now, we can calculate the embeddings for both the page delta and the
+            # block offset. The unsqueeze method is used to create a two-dimensional
+            # tensor, even if there is just one element
+            # print("="*40)
+            # print(f"Delta index before unsqueezing (shape {delta_index.shape}): {delta_index}. Delta index after unsqueezing (shape {delta_index.unsqueeze(0).shape}): {delta_index.unsqueeze(0)}")
+            # print(f"Block offset before unsqueezing (shape {block.shape}): {block}. Block offset after unsqueezing (shape {block.unsqueeze(0).shape}): {block.unsqueeze(0)}")
+            page_emb = self.page_delta_embedding(delta_index.unsqueeze(0))
+            block_emb = self.block_offset_embedding(block.unsqueeze(0))
+            # print(f"Page embedding (shape {page_emb.shape}): {page_emb}")
+            # print(f"Block embedding (shape {block_emb.shape}): {block_emb}")
+
+            # The embeddings are concatenated to form an input for the LSTM. The
+            # concatenation is done using the last dimension, causing all
+            # elements of the resulting embedding to be in the same dimension
+            input_emb = torch.cat([page_emb, block_emb], dim=-1)
+            # print(f"Input embedding (shape {input_emb.shape}): {input_emb}")
+            embedded_inputs.append(input_emb)
+
+            # The last page is saved for the next access
+            last_page = page
+        
+        # The embeddings are stacked. The resulting tensor is of shape
+        # (seq_len, 1, input_size)
+        embedded_seq = torch.stack(embedded_inputs, dim=0)
+
+        # However, PyTorch expects the first dimension to be the batch size
+        # and the second dimension to be the sequence length, so we
+        # need to change both dimensions. The resulting tensor is of shape
+        # (1, seq_len, input_size)
+        embedded_seq = embedded_seq.transpose(0, 1)
+
+        # The whole sequence is now processed by the LSTM
+        lstm_out, (hidden_new, cell_new) = self.lstm(embedded_seq, (hidden, cell))
+
+        # Now, each LSTM output is used to calculate a prediction. There are as many
+        # predictions as timesteps. Each LSTM output is of shape (1, seq_len, hidden_size)
+        for t in range(seq_len):
+            # The hidden state for this timestep is obtained. The hidden state
+            # contains info about the sequence of memory accesses for the current
+            # thread ID
+            state_t = lstm_out[0, t, :]
+
+            # The predictions are done using the fully connected layers. The
+            # input for these layers is the hidden state
+            page_delta_pred = self.fc_page_delta(state_t.unsqueeze(0))
+            block_pred = self.fc_block(state_t.unsqueeze(0))
+
+            # The prediction is appended to the predictions list
+            predictions.append((page_delta_pred, block_pred))
+        
+        # The predictions and the final state are returned
+        return predictions, (hidden_new, cell_new, last_page)
+    
+    def reset_state(self, thread_id:int=None):
+        """
+            This method resets the state for a specific thread ID or
+            for all thread IDs
+
+        Args:
+            thread_id (int, optional):  thread ID whose state will be reset.
+                                        Defaults to None. If None, all thread
+                                        ID's states will be reset
+        """
+
+        if thread_id is None:
+            self.states = dict()
+        else:
+            if thread_id in self.states:
+                del self.states[thread_id]
+    
+    def get_state(self, thread_id:int):
+        """
+            Returns the state for a given thread ID
+
+        Args:
+            thread_id (int):    ID for the thread whose state will be returned
+        
+        Returns:
+            A tuple (hidden_state, cell_state, last_page) if the thread ID has
+            a state, or None if the thread ID doesn't have a state
+        """
+        return self.states.get(thread_id, None)
 
     def get_config(self):
         """
@@ -347,6 +324,7 @@ class LSTM(nn.Module):
         """
 
         return {
+            "delta_page_embed_in": self.delta_page_embed_in,
             "page_embed_dim": self.page_embed_dim,
             "block_embed_dim": self.block_embed_dim,
             "hidden_size": self.hidden_size,
@@ -456,10 +434,6 @@ class OptunaHyperparameterSearch:
         # Each hyperparameter has a name and a list or a range of possible
         # values to choose from
         model_config = {
-
-            # Size for the absolute page embedding input. Optuna chooses one from the list
-            "abs_page_embed_in": trial.suggest_categorical("abs_page_embed_in", [2**10, 2**11, 2**12, 2**13, 2**14, 2**15, 2**16]),
-
             # Size for the delta page embedding input. Optuna chooses one from the list
             "delta_page_embed_in": trial.suggest_categorical("delta_page_embed_in", [(2**10)*2+1, (2**11)*2+1, (2**12)*2+1, (2**13)*2+1, (2**14)*2+1, (2**15)*2+1]),
 
@@ -488,10 +462,6 @@ class OptunaHyperparameterSearch:
             # range [0.0001,0.01]
             "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2),
 
-            # Number of previous accesses to use for the history. Optuna chooses one
-            # integer in the range [3,6]
-            "history_size": trial.suggest_int("history_size", 3, 6),
-
             # Number of accesses to skip in order to avoid prefetching too early.
             # Optuna chooses one integer in the range [3,7]
             "lookahead_size": trial.suggest_int("lookahead_size", 3, 7),
@@ -499,6 +469,10 @@ class OptunaHyperparameterSearch:
             # Number of training examples in one batch. Optuna chooses one
             # from the list
             "batch_size": trial.suggest_categorical("batch_size", [128, 256, 512]),
+
+            # Number of accesses in each TBPTT sequence. Optuna chooses one
+            # integer in the range [10,20]
+            "tbptt_length": trial.suggest_int("tbptt_length", 10, 20),
 
             # Number of training epochs. They are fixed to 10 to speed up
             # trials, but will surely be larger during training once the best
@@ -629,26 +603,31 @@ class MLPrefetchModel(object):
         pass
 
 class LSTMBasedPrefetcher(MLPrefetchModel):
-    # Instead of using hard labels and tell the prefetcher to guess
-    # the k next accesses, this allows the prefetcher to guess any of
-    # many next accesses, where the closest ones are more valuable
-    TOLERANCE_SIZE = 20
-
-    # The number of memory accesses used as input for the LSTM
-    HISTORY_SIZE = 4
+    # This allows for the calculation of a "tolerant accuracy" which takes
+    # into account the fact that a prefetch can be useful even if the access
+    # to the prefetched block is not exactly lookahead_size accesses ahead
+    tolerance_size = 20
 
     # The number of memory acesses to skip when prefetching. This
     # help prevent early prefetches
-    LOOKAHEAD_SIZE = 5
+    lookahead_size = 5
 
     # The number of training epochs for the LSTM
-    NUM_EPOCHS = 30
+    num_epochs = 30
 
     # The default size for a batch
-    BATCH_SIZE = 256
+    batch_size = 256
 
     # The learning rate for the LSTM
-    LEARNING_RATE = 0.002
+    learning_rate = 0.002
+
+    # The length of the sequence for TBPTT. When calling backward(), gradients
+    # are used to calculate the new weights of the neural network. If backward()
+    # is called after a large amount of accesses, it can be very slow and consume
+    # a lot of RAM. Instead, backward() is called every few steps to calculate
+    # weights continuously, saving RAM and time. The model can still be stateful:
+    # the hidden state is kept even after calling backward.
+    tbptt_length = 15
 
     def __init__(self, model_config:dict=None):
         """
@@ -679,25 +658,25 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                             the value of each hyperparameter. An example for this
                             dictionary is the following:
                             {
-                                "history_size": 5,
                                 "lookahead_size": 7,
                                 "learning_rate": 0.001,
                                 "num_epochs": 20,
-                                "batch_size": 512
+                                "batch_size": 512,
+                                "tbptt_length": 15
                             }
         """
         # It's important to check if each hyperparameter is present in
         # the dictionary before using it
-        if "history_size" in config:
-            self.HISTORY_SIZE = config["history_size"]
         if "lookahead_size" in config:
-            self.LOOKAHEAD_SIZE = config["lookahead_size"]
+            self.lookahead_size = config["lookahead_size"]
         if "learning_rate" in config:
-            self.LEARNING_RATE = config["learning_rate"]
+            self.learning_rate = config["learning_rate"]
         if "num_epochs" in config:
-            self.NUM_EPOCHS = config["num_epochs"]
+            self.num_epochs = config["num_epochs"]
         if "batch_size" in config:
-            self.BATCH_SIZE = config["batch_size"]
+            self.batch_size = config["batch_size"]
+        if "tbptt_length" in config:
+            self.tbptt_length = config["tbptt_length"]
 
     def load(self, path:str):
         """
@@ -742,195 +721,143 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             # we will have to manually create it. For simplicity, we will
             # assume a batch size of 1
 
-            # The example_pages tensor will be a (1, HISTORY_SIZE) tensor
-            # where each element represents the page address of an access in
-            # the sequence
-            example_pages = torch.randint(0, self.model.abs_page_embed_in, (1, self.HISTORY_SIZE))
+            # The example_seq tensor will be a (5, 2) tensor containing a sequence
+            # of 5 randomly generated memory accesses. 
+            example_seq = torch.randint(0, BLOCK_OFFSET_EMBEDDING_INPUT, (5, 2))
 
-            # The example_blocks tensor will be a (1, HISTORY_SIZE) tensor
-            # where each element represents the block offset of an access
-            # in the sequence
-            example_blocks = torch.randint(0, BLOCK_OFFSET_EMBEDDING_INPUT, (1, self.HISTORY_SIZE))
+            # This is an example thread ID for the example sequence
+            example_thread_id = 12345
 
-            # If cuda is available, the tensors are moved to the GPU 
+            # If cuda is available, the example_seq tensor is moved to the GPU 
             if torch.cuda.is_available():
-                example_pages = example_pages.cuda()
-                example_blocks = example_blocks.cuda()
-
-            # These two tensors are stacked into one tensor of size (1, history, 2)
-            example_input = torch.stack([example_pages, example_blocks], dim=-1)
+                example_seq = example_seq.cuda()
             
             # The input is used to save the model via the trace function
-            traced = torch.jit.trace(self.model, example_input)
+            traced = torch.jit.trace(
+                self.model.forward_sequence,
+                (example_seq, example_thread_id, None)
+            )
             traced.save(path)
             print(f"Model successfully saved using torch.jit.trace to {path}")
 
-    def batch(self, data:list, batch_size:int=None):
+    
+    def create_tbptt_sequences(self, data:list):
         """
-            This function batches the memory acces data for the
-            LSTM model.
+            This method groups the accesses by thread ID and creates sequences
+            for truncated BPTT.
 
         Args:
-            data (list):                List of memory accesses, where each memory access
-                                        is another list with this structure:
-                                        [instr_id, cycle, load_address, ip, cache_hit]
-                         
-            batch_size (int, optional): The size of the batch. If None, the
-                                        size is set to self.BATCH_SIZE
-
+            data (list):    List of accesses. Each access is another list with
+                            [instr_id, cycle, load_address, ip, thread_id, cache_hit]
+            
         Yields:
-            _type_: _description_
+            A tuple (thread_id, sequence_tensor, targets_list, whole_windows_list)
+            where:
+                - sequence_tensor has a shape (seq_len, 2) where each row contains [page, block]
+                - targets_list is a list of (target_delta_idx, target_block)
+                - whole_windows_list is a list of whole windows used for accuracy
         """
 
-        # The default batch size is set if no batch size
-        # was specified as a parameter
-        if batch_size is None:
-            batch_size = self.BATCH_SIZE
+        # Accesses are grouped by thread ID
+        thread_id_sequences = defaultdict(list)
 
-        # Here we will store the memory accesses
-        bucket_data = defaultdict(list)
-        
-        # In these lists we will accumulate data for each batch. When
-        # a batch is formed, these lists will be cleared
-
-        # This list contains input sequences of size (HISTORY_SIZE, 2)
-        # containing [page address, block offset] for each memory access
-        # in the sequence
-        batch_sequences = []
-
-        # This list contains target accesses to learn. Their shape is (2,)
-        # because they just contain [page delta, block offset] for each
-        # input example  
-        batch_targets = []
-
-        # This list contains data about all accesses in the window for each 
-        # input example. This info will be useful when calculating the
-        # accuracy
-        batch_whole_windows = []
-        
-        # Total window size: history + lookahead + tolerance window
-        window_size = self.HISTORY_SIZE + self.LOOKAHEAD_SIZE + self.TOLERANCE_SIZE
-        
-        # Each line (each mem access) is read
+        # Each access is read
         for line in data:
-            # Each mem access contains five pieces of data
-            instr_id, cycle, load_address, ip, cache_hit = line
-            
-            # The page address is calculated. 4096-byte pages are assumed
+            # The info for this access is stored in variables
+            instr_id, cycle, load_address, ip, thread_id, cache_hit = line
+
+            # The page is calculated
             page = load_address >> 12
 
-            # The block offset is calculated. 128-byte blocks are assumed. Since
-            # each 4096-byte page contains 32 128-byte blocks (2^5), only the five
-            # least significant bits of the block address are selected
+            # The block offset is calculated
             block_offset = (load_address >> 7) & 0x1F
-            
-            # The bucket key is the IP by default
-            bucket_key = ip
-            
-            # The buffer for this IP is stored in a variable to
-            # avoid getting too verbose
-            bucket_buffer = bucket_data[bucket_key]
-            
-            # The current access is appended as [page, block_offset]
-            bucket_buffer.append([page, block_offset])
-            
-            # If we have enough memory accesses to create a training example,
-            # we create it. This is necessary because there are not enough
-            # memory accesses at the beginning, but once many memory accesses
-            # are recorded it is possible to create a training example with
-            # the proper size
-            if len(bucket_buffer) >= window_size:
-                # The history sequence consists of the first self.HISTORY_SIZE
-                # memory accesses
-                history_sequence = bucket_buffer[:self.HISTORY_SIZE]
-                
-                # The target access (the access that must be predicted) is the
-                # access located self.HISTORY_SIZE + self.LOOKAHEAD_SIZE accesses
-                # away from the first access
-                target_access = bucket_buffer[self.HISTORY_SIZE + self.LOOKAHEAD_SIZE]
 
-                # The LSTM doesn't predict page addresses: it predicts page deltas.
-                # Due to this, it's necessary to calculate the delta for the target
-                last_history_page = history_sequence[-1][0]
-                target_page = target_access[0]
-                target_block = target_access[1]
-                target_delta = target_page - last_history_page
-
-                # Since the LSTM can't predict all possible deltas, we have to clamp
-                # the delta to a correct value
-                max_value_delta = (DELTA_PAGE_EMBEDDING_INPUT-1)//2
-                target_delta_clamped = max(-max_value_delta, min(max_value_delta, target_delta))
-
-                # Also, the LSTM can't predict negativa values. It only predicts
-                # indices, so it's necessary to transform this clamped delta
-                # into an index between 0 and DELTA_PAGE_EMBEDDING_INPUT
-                target_delta_clamped_index = target_delta_clamped + max_value_delta
-                
-                # The history and the target are added to the sequence
-                batch_sequences.append(history_sequence)
-                batch_targets.append([target_delta_clamped_index, target_block])
-                
-                # The whole window is recorded for accuracy calculation
-                batch_whole_windows.append(bucket_buffer[:window_size])
-                
-                # After we finish with this window, we slide it: the oldest
-                # access is removed
-                bucket_buffer.pop(0)
-            
-            # If we have accumulated a full batch, we yield it (this makes
-            # this function a generator, since it only yields one batch
-            # at a time, instead of returning all batches at once)
-            if len(batch_sequences) == batch_size:
-                # It's necessary to convert the info to tensors
-
-                # batch_sequences: list of shape (batch_size, HISTORY_SIZE, 2)
-                sequences_tensor = torch.LongTensor(batch_sequences)
-
-                # batch_targets: list of shape (batch_size, 2)
-                targets_tensor = torch.LongTensor(batch_targets)
-                
-                # If CUDA is avaulable, the tensors are sent to the GPU
-                # for faster computation
-                if torch.cuda.is_available():
-                    sequences_tensor = sequences_tensor.cuda()
-                    targets_tensor = targets_tensor.cuda()
-                
-                # This batch is yielded
-                yield (
-                    # Input sequences: (batch_size, HISTORY_SIZE, 2)
-                    sequences_tensor,
-
-                    # Target accesses: (batch_size, 2)
-                    targets_tensor,
-
-                    # Info about the whole window for each access
-                    # (used for accuracy calculation)
-                    batch_whole_windows
-                )
-                
-                # The info about this batch is cleared, the next
-                # batch will be prepared using the next memory accesses
-                batch_sequences = []
-                batch_targets = []
-                batch_whole_windows = []
+            # The access is added to the corresponding thread ID sequence
+            thread_id_sequences[thread_id].append([page, block_offset])
         
-        # If there are no more memory accesses left and there is a batch
-        # being prepared, it is returned (altough it won't be a whole
-        # batch)
-        if len(batch_sequences) > 0:
-            # The same procedure is followed
-            sequences_tensor = torch.LongTensor(batch_sequences)
-            targets_tensor = torch.LongTensor(batch_targets)
-            
-            if torch.cuda.is_available():
-                sequences_tensor = sequences_tensor.cuda()
-                targets_tensor = targets_tensor.cuda()
-            
-            yield (
-                sequences_tensor,
-                targets_tensor,
-                batch_whole_windows
-            )
+        # For each thread ID we create sequences of length tbptt_length
+        for thread_id, accesses in thread_id_sequences.items():
+            # We need at least tbptt_length + lookahead_size + tolerance_size accesses
+            # to be able to calculate the accuracy for each prediction in the sequence
+            min_length = self.tbptt_length + self.lookahead_size + self.tolerance_size
+
+            # If the current thread ID doesn't have enough accesses, it is discarded
+            if len(accesses) < min_length:
+                continue
+                
+            # If there are enough accesses, we can create sequences
+            for start_idx in range(0, len(accesses) - min_length + 1, self.tbptt_length):
+                # The end index is the index of the last access for the TBPTT sequence. In
+                # order for us to properly calculate the accuracy, after each TBPTT sequence
+                # it is necessary to add the predicted access and some more accesses for
+                # tolerant accuracy calculation.
+                end_idx = min(start_idx + self.tbptt_length, len(accesses) - self.lookahead_size - self.tolerance_size - 1)
+
+                # If there are not enough accesses for both the TBPTT sequence and the
+                # rest of the accesses for tolerant accuracy calculation, the TBPTT sequence
+                # cannot be formed
+                if end_idx <= start_idx:
+                    break
+                    
+                # If there are enough accesses, the sequence length is calculated. This should
+                # be tbptt_length, but if we are close to the end it could be shorter.
+                seq_len = end_idx - start_idx
+                sequence = accesses[start_idx:end_idx]
+
+                # In these lists we will store the targets and the windows for each timestep in the sequence
+                targets = []
+                whole_windows = []
+
+                # We iterate for each input access in the sequence
+                for t in range(seq_len):
+                    # The target access (the access we want to predict) is
+                    # lookahead_size + 1 steps ahead
+                    target_idx = start_idx + t + 1 + self.lookahead_size
+
+                    # The target should be within the access window
+                    assert target_idx < len(accesses), "The target index is beyond the access window's limits"
+
+                    # We obtain the page address for the current access
+                    current_page = accesses[start_idx + t][0]
+                    
+                    # We obtain the page address and the block offset of the
+                    # target access we want to predict
+                    target_page = accesses[target_idx][0]
+                    target_block = accesses[target_idx][1]
+
+                    # We calculate the delta between both pages and transform
+                    # it into an index
+                    delta = target_page - current_page
+                    max_value_delta = (self.model.delta_page_embed_in - 1) // 2
+                    delta_clamped = max(-max_value_delta, min(max_value_delta, delta))
+                    delta_index = delta_clamped + max_value_delta
+                    delta_index = max(0, min(self.model.delta_page_embed_in - 1, delta_index))
+
+                    # We append the target delta and the target block offset to
+                    # the list of targets for this sequence
+                    targets.append((delta_index, target_block))
+
+                    # Now we select the accesses that will form the window that will later
+                    # be used to calculate accuracy
+                    window_end = min(
+                        start_idx + t + 1 + self.lookahead_size + self.tolerance_size,
+                        len(accesses)
+                    )
+
+                    whole_window = accesses[start_idx+t:window_end]
+                    whole_windows.append(whole_window)
+                
+                # After creating this TBPTT sequence, the targets list should contain
+                # at least one target, corresponding to one input
+                assert len(targets) > 0, "No valid targets were found"
+                
+                # The sequence is transformed into a tensor. This tensor will be the
+                # input, containing as many input accesses as there are targets
+                device = next(self.model.parameters()).device
+                sequence_tensor = torch.LongTensor(sequence[:len(targets)])
+
+                yield ip, sequence_tensor, targets, whole_windows
+
     
     def train_and_test(self, train_data:list, test_data:list, model_name:str=None, graph_name:str=None):
         """
@@ -951,11 +878,11 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             graph_name (str):   Path to save training graphs
         """
         print(f"Called train_and_test method. Training with the following hyperparameters:")
-        print(f"\t- LEARNING_RATE = {self.LEARNING_RATE}")
-        print(f"\t- HISTORY_SIZE = {self.HISTORY_SIZE}")
-        print(f"\t- LOOKAHEAD_SIZE = {self.LOOKAHEAD_SIZE}")
-        print(f"\t- BATCH_SIZE = {self.BATCH_SIZE}")
-        print(f"\t- NUM_EPOCHS = {self.NUM_EPOCHS}")
+        print(f"\t- learning_rate = {self.learning_rate}")
+        print(f"\t- lookahead_size = {self.lookahead_size}")
+        print(f"\t- batch_size = {self.batch_size}")
+        print(f"\t- num_epochs = {self.num_epochs}")
+        print(f"\t- tbptt_length = {self.tbptt_length}")
 
         # If the model's loss during test doesn't improve for 3 epochs,
         # training ends to avoid overfitting
@@ -969,7 +896,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         epochs_without_improvement = 0
 
         # The optimizer used to update the model's parameters
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.LEARNING_RATE)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
         # The loss functions for page delta and block predictions.
         # CrossEntropyLoss is better for classification tasks (predicting indices)
@@ -995,9 +922,9 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         total_test_loss = []
 
         # Training loop
-        for epoch in range(self.NUM_EPOCHS):
+        for epoch in range(self.num_epochs):
             print(f"\n{'='*60}")
-            print(f"Epoch {epoch + 1}/{self.NUM_EPOCHS}")
+            print(f"Epoch {epoch + 1}/{self.num_epochs}")
             print(f"{'='*60}")
             
             # ============================================================
@@ -1006,77 +933,115 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
 
             # The model is set to training mode to allow its parameters to be updated
             self.model.train()
+
+            # The model's state is reset for all thread ID's since a new epoch has
+            # just begun and we shoulnd't have memory from the last epoch (the
+            # weights will be updated, but the model won't remember having seen
+            # any accesses before)
+            self.model.reset_state()
             
             # The training accuracies and losses will be stored here
             train_strict_accs = []
             train_tolerant_accs = []
             train_losses = []
 
-            # This is a helper variable that is used to show the training progress
-            train_percent = len(train_data) // self.BATCH_SIZE // 100
+            # This counter will be increased by 1 for each tbptt sequence
+            sequence_count = 0
 
             print("Training...")
-            for i, (sequences, targets, whole_windows) in enumerate(self.batch(train_data)):
-                # sequences is a tensor of shape (batch_size, HISTORY_SIZE, 2)
-                # targets is a tensor of shape (batch_size, 2) with [page_delta_index, block]
+            for thread_id, sequence, targets, whole_windows in self.create_tbptt_sequences(train_data):
+                sequence_count+=1
+
+                # We obtain the previous state for this thread ID (or None if this is the first time
+                # that the model sees memory accesses requested by this thread ID)
+                prev_state = self.model.get_state(thread_id)
+
+                # If there is a previous state, we call detach() to truncate backpropagation
+                # through time, since the gradients should have already been calculated for
+                # the last sequence of this thread ID
+                if prev_state is not None:
+                    hidden, cell, last_page = prev_state
+                    prev_state = (hidden.detach(), cell.detach(), last_page)
                 
-                # The gradients are cleared because we are going
-                # to calculate new ones
-                optimizer.zero_grad()
-
-                # Both the predicted page deltas and block offsets are obtained
-                # by performing a forward pass. The shapes are the following:
-                # · page_delta_pred: (batch_size, DELTA_PAGE_EMBEDDING_INPUT)
-                # · block_pred: (batch_size, BLOCK_OFFSET_EMBEDDING_INPUT)
-                page_delta_pred, block_pred = self.model(sequences)
-
-                # The target page deltas and block offsets are extracted
-                # from the targets tensor. Both resulting tensors will have
-                # a shape of (batch_size,)
-                target_page_deltas = targets[:, 0].long()
-                target_blocks = targets[:, 1].long()
-
-                # Once we have the logits (the page_delta_pred and block_pred tensors)
-                # and the targets (the target_page_deltas and target_blocks tensors) we
-                # can calculate the losses
-                loss_page = criterion_page(page_delta_pred, target_page_deltas)
-                loss_block = criterion_block(block_pred, target_blocks)
-                
-                # Both losses are combined into one global loss
-                loss_train = loss_page + loss_block
-
-                # Once we have the losses, the accuracy is calculated
-                strict_acc, tolerant_acc = self.accuracy(
-                    page_delta_pred, 
-                    block_pred, 
-                    target_page_deltas, 
-                    target_blocks,
-                    sequences,
-                    whole_windows
+                # The whole sequence is processed
+                predictions, final_state = self.model.forward_sequence(
+                    sequence, thread_id, prev_state
                 )
 
-                # Now, we can do the backward pass and backpropagation
-                loss_train.backward()
+                # Now, we can calculate the loss and the accuracy for the predictions.
+                # First, the gradients are cleared because we are going to calculate
+                # new ones
+                optimizer.zero_grad()
+
+                # These variables will help calculate total loss and accuracy
+                total_loss = 0
+                seq_strict_correct = 0
+                seq_tolerant_correct = 0
+
+                # Now, we iterate through every example in the sequence
+                for t, ((page_delta_pred, block_pred), (target_delta_idx, target_block), whole_window) in enumerate(
+                    zip(predictions, targets, whole_windows)
+                ):
+                    # The target tensors are created
+                    target_delta_tensor = torch.LongTensor([target_delta_idx])
+                    target_block_tensor = torch.LongTensor([target_block])
+
+                    # If cuda is available, the tensors are moved to the GPU
+                    if torch.cuda.is_available():
+                        target_delta_tensor = target_delta_tensor.cuda()
+                        target_block_tensor = target_block_tensor.cuda()
+                    
+                    # Now, the loss is calculated for the deltas and the block offsets,
+                    # and both are accumulated into one global loss
+                    loss_page = criterion_page(page_delta_pred, target_delta_tensor)
+                    loss_block = criterion_block(block_pred, target_block_tensor)
+                    total_loss += loss_page + loss_block
+
+                    # After calculating the loss, the accuracy is calculated.
+                    # The page delta is obtained by finding the index with the
+                    # highest value in the page delta index tensor. This index
+                    # is then transformed into a delta
+                    pred_delta_idx = torch.argmax(page_delta_pred, dim=1).item()
+                    max_value_delta = (self.model.delta_page_embed_in - 1) // 2
+                    pred_delta = pred_delta_idx - max_value_delta
+                    pred_delta = max(-max_value_delta, min(pred_delta, max_value_delta))
+
+                    # The predicted block is easier to obtain
+                    pred_block = torch.argmax(block_pred, dim=1).item()
+
+                    # Now, both accuracies (strict and tolerant) are calculated, and their
+                    # result is added to the counters
+                    strict, tolerant = self.accuracy(pred_delta, pred_block, whole_window)
+                    seq_strict_correct += strict
+                    seq_tolerant_correct += tolerant
+                
+                # Once the sequence was fully treated, backward pass is done (the
+                # calculated gradients are used to update the model's weights)
+                total_loss.backward()
                 optimizer.step()
 
-                # The obtained metrics are appended to the lists accordingly
-                train_losses.append(float(loss_train.item()))
-                train_strict_accs.append(float(strict_acc))
-                train_tolerant_accs.append(float(tolerant_acc))
+                # The final state is saved
+                self.model.states[thread_id] = final_state
 
-                # If we progressed enough, a period is shown on screen
-                if train_percent != 0 and i % train_percent == 0:
-                    print('.', end='', flush=True)
+                # The metrics are saved
+                train_losses.append(total_loss.item())
+                train_strict_accs.append(seq_strict_correct / len(targets))
+                train_tolerant_accs.append(seq_tolerant_correct / len(targets))
 
+                # A period is shown on the terminal each 100 sequences
+                if sequence_count % 100 == 0:
+                    print(".", end="", flush=True)
+            
+            # After training, the average strict accuracy and the average tolerant
+            # accuracy are calculated and printed
+            avg_strict = sum(train_strict_accs) / len(train_strict_accs) if train_strict_accs else 0
+            avg_tolerant = sum(train_tolerant_accs) / len(train_tolerant_accs) if train_tolerant_accs else 0
             print()
-            avg_strict = sum(train_strict_accs) / len(train_strict_accs)
-            avg_tolerant = sum(train_tolerant_accs) / len(train_tolerant_accs)
             print(f'Training strict accuracy: {avg_strict:.4f}')
             print(f'Training tolerant accuracy: {avg_tolerant:.4f}')
             print(f'Training loss: {sum(train_losses):.4f}')
 
-            # The accuracies are averaged and the losses are added, and both are
-            # appended to their corresponding list
+            # Then, they are added to their lists
             avg_train_strict_accs.append(avg_strict)
             avg_train_tolerant_accs.append(avg_tolerant)
             total_train_loss.append(sum(train_losses))
@@ -1087,120 +1052,134 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
 
             # In this case, the model is set to evaluation mode
             self.model.eval()
+
+            # Now, the model is reset in order for it to forget what accesses
+            # it saw during training
+            self.model.reset_state()
             
             # The test accuracies and losses will be stored here
             test_strict_accs = []
             test_tolerant_accs = []
             test_losses = []
 
-            # This is a helper variable that is used to show the test progress
-            test_percent = len(test_data) // self.BATCH_SIZE // 100
+            # Just like during training, this variable will be incremented by
+            # 1 each time a new sequence is processed
+            sequence_count = 0
 
             print("Testing...")
 
             # We use torch.no_grad() because it's not necessary to calculate
             # gradients during test
             with torch.no_grad():
-                for i, (sequences, targets, whole_windows) in enumerate(self.batch(test_data)):
+                for thread_id, sequence, targets, whole_windows in self.create_tbptt_sequences(test_data):
+                    sequence_count+=1
 
-                    # We obtain the logits (forward pass)
-                    page_delta_pred, block_pred = self.model(sequences)
+                    # We get the previous state for this thread ID (if any)
+                    prev_state = self.model.get_state(thread_id)
 
-                    # We extract the target tensors
-                    target_page_deltas = targets[:, 0].long()
-                    target_blocks = targets[:, 1].long()
-
-                    # Then, using the logits and the targets we calculate the loss
-                    loss_page = criterion_page(page_delta_pred, target_page_deltas)
-                    loss_block = criterion_block(block_pred, target_blocks)
-
-                    # Just like we did during training, both losses are added
-                    loss_test = loss_page + loss_block
-
-                    # Then, we calculate the accuracy
-                    strict_acc, tolerant_acc = self.accuracy(
-                        page_delta_pred, 
-                        block_pred, 
-                        target_page_deltas, 
-                        target_blocks,
-                        sequences,
-                        whole_windows
+                    # We perform the forward pass just like it was done during training
+                    predictions, final_state = self.model.forward_sequence(
+                        sequence, thread_id, prev_state
                     )
 
-                    # The metrics are appended to their lists
-                    test_losses.append(float(loss_test.item()))
-                    test_strict_accs.append(float(strict_acc))
-                    test_tolerant_accs.append(float(tolerant_acc))
+                    # In these variables we will accumulate the loss and the accuracy
+                    total_loss = 0
+                    seq_strict_correct = 0
+                    seq_tolerant_correct = 0
 
-                    # The progress indicator is updated
-                    if test_percent != 0 and i % test_percent == 0:
+                    # We iterate for each example in the test dataset
+                    for t, ((page_delta_pred, block_pred), (target_delta_idx, target_block), whole_window) in enumerate(
+                        zip(predictions, targets, whole_windows)
+                    ):
+                        # Tensors are created using the target delta index and the
+                        # target block offset
+                        target_delta_tensor = torch.LongTensor([target_delta_idx])
+                        target_block_tensor = torch.LongTensor([target_block])
+                        
+                        # These tensors are moved to the GPU if available
+                        if torch.cuda.is_available():
+                            target_delta_tensor = target_delta_tensor.cuda()
+                            target_block_tensor = target_block_tensor.cuda()
+                        
+                        # The loss for the page delta prediction and the loss for the block
+                        # offset prediction are calculated and accumulated in one variable
+                        loss_page = criterion_page(page_delta_pred, target_delta_tensor)
+                        loss_block = criterion_block(block_pred, target_block_tensor)
+                        total_loss += loss_page + loss_block
+
+                        # The predicted delta is obtained from the predicted index
+                        pred_delta_idx = torch.argmax(page_delta_pred, dim=1).item()
+                        max_value_delta = (self.model.delta_page_embed_in - 1) // 2
+                        pred_delta = pred_delta_idx - max_value_delta
+                        pred_delta = max(-max_value_delta, min(pred_delta, max_value_delta))
+                        
+                        # The predicted block is easier to obtain (no calculations necessary)
+                        pred_block = torch.argmax(block_pred, dim=1).item()
+                        
+                        # The strict and tolerant accuracy for this access is calculated
+                        strict, tolerant = self.accuracy(pred_delta, pred_block, whole_window)
+                        seq_strict_correct += strict
+                        seq_tolerant_correct += tolerant
+                    
+                    # After this sequence, the final state for this thread ID is
+                    # saved for later
+                    self.model.states[thread_id] = final_state
+                    
+                    # The metrics are added to their lists
+                    test_losses.append(total_loss.item())
+                    test_strict_accs.append(seq_strict_correct / len(targets))
+                    test_tolerant_accs.append(seq_tolerant_correct / len(targets))
+                    
+                    # A period is shown on the terminal each 100 sequences
+                    if sequence_count % 100 == 0:
                         print('.', end='', flush=True)
-
+                
+            # The average accuracies for this epoch are calculated and shown
+            # on the screen
+            avg_strict = sum(test_strict_accs) / len(test_strict_accs) if test_strict_accs else 0
+            avg_tolerant = sum(test_tolerant_accs) / len(test_tolerant_accs) if test_tolerant_accs else 0
             print()
-            avg_strict = sum(test_strict_accs) / len(test_strict_accs)
-            avg_tolerant = sum(test_tolerant_accs) / len(test_tolerant_accs)
             print(f'Test strict accuracy: {avg_strict:.4f}')
             print(f'Test tolerant accuracy: {avg_tolerant:.4f}')
             print(f'Test loss: {sum(test_losses):.4f}')
 
-            # The accuracies are averaged and the losses are added, and both are
-            # appended to their corresponding list
+            # The average accuracies and the total loss are added to
+            # the correct list
             avg_test_strict_accs.append(avg_strict)
             avg_test_tolerant_accs.append(avg_tolerant)
             total_test_loss.append(sum(test_losses))
 
-            # ============================================================
-            # SAVE MODEL CHECKPOINT
-            # ============================================================
+            # If a model name was given, a checkpoint of the model is saved there
             if model_name is not None:
                 checkpoint_path = f"{model_name}-epoch{epoch+1}.pt"
                 self.save(checkpoint_path)
                 print(f"Model saved to {checkpoint_path}")
-
-            # ============================================================
-            # EARLY STOPPING
-            # ============================================================
-
-            # The loss for the current epoch during test is calculated
-            current_loss = sum(test_losses)
             
-            # If the loss has decreased, then that's alright. We can keep
-            # training without worrying about anything
+            # The total current loss is calculated and, if the model is not
+            # improving, early stopping is triggered
+            current_loss = sum(test_losses)
+        
             if current_loss < best_test_loss:
                 print(f"Test loss improved from {best_test_loss:.6f} to {current_loss:.6f}")
                 best_test_loss = current_loss
                 epochs_without_improvement = 0
-
-            # If the loss hasn't decreased, then maybe we should start to
-            # worry a bit. Maybe there is some overfitting going on...
             else:
                 epochs_without_improvement += 1
                 print(f"No improvement in test loss. Patience: {epochs_without_improvement}/{patience}")
-
-            # If the model goes for too many epochs without improving its
-            # loss, then there is clearly overfitting, and the training is
-            # stopped
+            
             if epochs_without_improvement >= patience:
                 print("\nEarly stopping triggered")
                 break
 
-        # ============================================================
-        # PLOT RESULTS
-        # ============================================================
+        # Once all epochs are completed, the results are plotted
         if graph_name is not None:
             self._plot_training_results(
-                avg_train_strict_accs,
-                avg_train_tolerant_accs,
-                avg_test_strict_accs,
-                avg_test_tolerant_accs,
-                total_train_loss,
-                total_test_loss,
-                graph_name
+                avg_train_strict_accs, avg_train_tolerant_accs,
+                avg_test_strict_accs, avg_test_tolerant_accs,
+                total_train_loss, total_test_loss, graph_name
             )
         
-        # ============================================================
-        # RETURN METRICS
-        # ============================================================
+        # Finally, all metrics are returned
         return {
             'train_strict_acc': avg_train_strict_accs[-1] if avg_train_strict_accs else 0,
             'train_tolerant_acc': avg_train_tolerant_accs[-1] if avg_train_tolerant_accs else 0,
@@ -1265,123 +1244,88 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         plt.savefig(f"{graph_name}.png", dpi=300)
         print(f"Training plots saved to {graph_name}.png")
     
-    def accuracy(self, page_delta_pred:torch.LongTensor, block_pred:torch.LongTensor, target_page_deltas:torch.LongTensor, target_blocks:torch.LongTensor, sequences:torch.LongTensor, whole_windows:list):
+    def accuracy(self, pred_delta:int, pred_block:int, whole_window:list):
         """
-            This method calculates the model's accuracy
+            This method calculates the model's accuracy for one prediction
         
         Args:
-            page_delta_pred(torch.LongTensor):      Logits for page deltas. Size: (batch_size, 4097).
-            block_pred(torch.LongTensor):           Logits for block offsets. Size: (batch_size, 32).
-            target_page_deltas(torch.LongTensor):   Ground truth page delta indices. Size: (batch_size,).
-            target_blocks(torch.LongTensor):        Ground truth block offsets. Size: (batch_size,).
-            sequences(torch.LongTensor):            Input sequences for the model. Size: (batch_size, HISTORY_SIZE, 2)
-            whole_windows(list):                    List of lists with complete windows for each example in the batch.
+            pred_delta(int):    The predicted page delta
+            
+            pred_block(int):    The predicted block offset
+
+            whole_window(list): The whole window of accesses, going from the
+                                current access to the access that is located
+                                self.lookahead_size + 1 + self.tolerance_size
+                                accesses later
         
         Returns:
-            tuple: (strict_accuracy, tolerant_accuracy), where:
-                -   strict_accuracy tells the accuracy when predicting the
-                    acces that is located exactly LOOKAHEAD_SIZE after the
-                    last history access
-                -   tolerant_accuracy tells the accuracy when predicting any
-                    of the accesses between the last history access and the
-                    access that is located LOOKAHEAD_SIZE+TOLERANCE_SIZE ahead
+            tuple: (strict_accuracy, tolerant_accuracy), where each variable
+            is 1 if the prediction was correct or 0 if it wasn't. If strict
+            accuracy is 1, then tolerant accuracy should be 1 too, since the
+            tolerant accuracy is less restrictive
         """
-        # First, we get the batch size (since a batch can be incomplete if the
-        # number of examples is not a multiple of the batch size, it's necessary
-        # to check this instead of assuming a fixed size)
-        batch_size = page_delta_pred.shape[0]
-        
-        # We obtain the predicted indices for both the page delta and the block
-        # offset for each example in the batch. This is done by using argmax, since
-        # page_delta_pred and block_pred contain logits. The resulting tensors
-        # have a shape of (batch_size,)
-        pred_page_delta_indices = torch.argmax(page_delta_pred, dim=1)
-        pred_block_offsets = torch.argmax(block_pred, dim=1)
-        
-        # The page delta indices need to be transformed into actual
-        # deltas, since the indices go from 0 to DELTA_PAGE_EMBEDDING_INPUT.
-        # This means that, if the indices go from 0 to 4097, the deltas must
-        # go from -2048 to 2048 (index 0 is delta -2048, index 1 is delta -2047...)
-        max_value_delta = (DELTA_PAGE_EMBEDDING_INPUT-1)//2
-        pred_page_deltas = pred_page_delta_indices - max_value_delta
-        
-        # These counters will help us track the amount of correct prefetches
+
+        # These flags will be returned later
         strict_correct = 0
         tolerant_correct = 0
+
+        # The input page is the page corresponding to the first page
+        # of the sequence
+        input_page = whole_window[0][0]
+
+        # Based on the predicted delta and the current page, we can
+        # calculate the predicted page
+        pred_page = input_page + pred_delta
+
+        # The target access is located 1 + self.lookahead_size accesses later.
+        # This will be used for strict accuracy calculation. The +1 represents
+        # that, if self.lookahead_size is 4, for example, we want to skip 4
+        # accesses and then predict the 5th one
+        target_idx = 1 + self.lookahead_size
+
+        # The target should be within the window
+        assert target_idx < len(whole_window), "Error: while calculating the accuracy, the target access was not within the window"
+
+        # The target page and the target block offset are obtained
+        target_page = whole_window[target_idx][0]
+        target_block = whole_window[target_idx][1]
         
-        # Then, we iterate through each access in this batch
-        for i in range(batch_size):
-            # First, we extract the last page from the history
-            last_history_page = sequences[i, -1, 0].item()
-            
-            # Then, we obtain the predicted page given the last history page
-            # and the predicted delta
-            pred_delta = pred_page_deltas[i].item()
-            pred_page = last_history_page + pred_delta
-
-            # We also obtain the predicted block offset
-            pred_block = pred_block_offsets[i].item()
-            
-            # Now, we obtain the whole window for this example, which is
-            # a list of [page, block] pairs
-            window = whole_windows[i]
-            
-            # ============================================================
-            # STRICT ACCURACY: Check exact match with target
-            # ============================================================
-
-            # The target is at position HISTORY_SIZE + LOOKAHEAD_SIZE
-            target_idx = self.HISTORY_SIZE + self.LOOKAHEAD_SIZE
-            
-            # The target should be inside the window
-            if target_idx < len(window):
-                # We check the window to obtain the page address and the
-                # block offset of the correct access
-                target_page_abs = window[target_idx][0]
-                target_block_abs = window[target_idx][1]
-                
-                # Then, we check if the predicted page and block offset are
-                # the same as the real ones
-                if pred_page == target_page_abs and pred_block == target_block_abs:
-                    strict_correct += 1
-            
-            # ============================================================
-            # TOLERANT ACCURACY: Check match within tolerance window
-            # ============================================================
-
-            # Tolerance window spans from HISTORY_SIZE to
-            # HISTORY_SIZE + LOOKAHEAD_SIZE + TOLERANCE_SIZE
-            tolerance_start = self.HISTORY_SIZE
-            tolerance_end = self.HISTORY_SIZE + self.LOOKAHEAD_SIZE + self.TOLERANCE_SIZE
-            
-            # The end of the tolerance window is set to the end of the window
-            # if there are not enough accesses
-            tolerance_end = min(tolerance_end, len(window))
-            
-            # Now, we check if the prediction matches any access in the tolerance window
-            match_found = False
-
-            # We iterate through each access in the tolerance window
-            for j in range(tolerance_start, tolerance_end):
-                # We obtain the page and the block of the current access
-                window_page = window[j][0]
-                window_block = window[j][1]
-                
-                # If the access matches the prediction, we can stop iterating
-                if pred_page == window_page and pred_block == window_block:
-                    match_found = True
-                    break
-            
-            # If we found a matching access, the counter is updated
-            if match_found:
-                tolerant_correct += 1
+        # If both the page and the block were correct, we can consider
+        # this a success for the strict accuracy part
+        if pred_page == target_page and pred_block == target_block:
+            strict_correct = 1
         
-        # Finally, we calculate accuracies by dividing the counters by the batch size.
-        # The result will be 1 if all predictions were correct and 0 if all predictions
-        # were incorrect
-        strict_accuracy = strict_correct / batch_size
-        tolerant_accuracy = tolerant_correct / batch_size
+        # Now, we need to check for tolerant accuracy. The first access
+        # of the tolerant window is the access right after the current
+        # access
+        tolerance_start = 1
+
+        # The end of the tolerance window should be 1 + self.lookahead_size
+        # + self.tolerance_size accesses later, but maybe the window is
+        # shorter, so there is no problem with that
+        tolerance_end = min(
+            1 + self.lookahead_size + self.tolerance_size,
+            len(whole_window)
+        )
         
-        return strict_accuracy, tolerant_accuracy
+        # For every access in the tolerance window...
+        for j in range(tolerance_start, tolerance_end):
+            # We obtain the page address and the block offset of that access
+            window_page = whole_window[j][0]
+            window_block = whole_window[j][1]
+            
+            # If the predicted page and the predicted block offset are
+            # both correct, we don't need to keep iterating
+            if pred_page == window_page and pred_block == window_block:
+                tolerant_correct = 1
+                break
+        
+        # If the strict prediction was correct, the tolerant
+        # one should be too
+        if strict_correct == 1:
+            assert tolerant_correct == 1, "Error: strict_correct was 1, but tolerant_correct wasn't"
+
+        # Finally both flags are returned
+        return strict_correct, tolerant_correct
 
 Model = LSTMBasedPrefetcher

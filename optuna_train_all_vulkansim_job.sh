@@ -8,16 +8,16 @@
 
 #SBATCH --nodes=1
 
-#SBATCH --output=train-all-vulkansim-%j.log
+#SBATCH --output=optuna_train-all-vulkansim-%j.log
 
 memoryPerJob="16G"
 
 queue="small_gpu"
 
-models_dir_name="models-lstm-1abs-2delta-optuna-tolerance-20-with-lookahead-vulkansim"
-logs_dir_name="logs-lstm-1abs-2delta-optuna-tolerance-20-with-lookahead-vulkansim"
-graphs_dir_name="graphs-lstm-1abs-2delta-optuna-tolerance-20-with-lookahead-vulkansim"
-experiments_dir_name="experiments-1abs-2delta-lstm-optuna-tolerance-20-with-lookahead-vulkansim"
+models_dir_name="models-lstm-1absxor-2delta-optuna-tolerance-20-with-lookahead-vulkansim"
+logs_dir_name="logs-lstm-1absxor-2delta-optuna-tolerance-20-with-lookahead-vulkansim"
+graphs_dir_name="graphs-lstm-1absxor-2delta-optuna-tolerance-20-with-lookahead-vulkansim"
+experiments_dir_name="experiments-1absxor-2delta-lstm-optuna-tolerance-20-with-lookahead-vulkansim"
 
 mkdir $models_dir_name
 mkdir $logs_dir_name
