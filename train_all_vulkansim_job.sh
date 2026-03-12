@@ -15,16 +15,16 @@ memoryPerJob="16G"
 #queue="small_gpu"
 queue="large"
 
-models_dir_name="models-delta-stateful-tolerance-20-with-lookahead-vulkansim"
-logs_dir_name="logs-delta-stateful-tolerance-20-with-lookahead-vulkansim"
-graphs_dir_name="graphs-delta-stateful-tolerance-20-with-lookahead-vulkansim"
+models_dir_name="results/delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/models"
+logs_dir_name="results/delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/logs"
+graphs_dir_name="results/delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/graphs"
 
-train_trace_directory="VulkanSimTrain-warp-id"
-test_trace_directory="VulkanSimTest-warp-id"
+train_trace_directory="VulkanSimTrain-sid-wid-tid"
+test_trace_directory="VulkanSimTest-sid-wid-tid"
 
-mkdir $models_dir_name
-mkdir $logs_dir_name
-mkdir $graphs_dir_name
+mkdir -p $models_dir_name
+mkdir -p $logs_dir_name
+mkdir -p $graphs_dir_name
 
 for scene in BATH BUNNY CAR CHSNT CRNVL FOX FRST LANDS PARK PARTY REF ROBOT SHIP SPNZA SPRNG WKND;
 do

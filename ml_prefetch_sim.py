@@ -432,9 +432,14 @@ def read_load_trace_data(load_trace, num_prefetch_warmup_instructions = 99999999
     def process_line(line):
         split = line.strip().split(', ')
         if len(split) == 5:
+                   # Unique ID    Cycle          Byte address       IP                 Cache hit
             return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), split[4] == '1'
         elif len(split) == 6:
+                   # Unique ID    Cycle          Byte address       IP                 Warp ID            Cache hit
             return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), int(split[4], 16), split[5] == '1'
+        elif len(split) == 8:
+                   # Unique ID    Cycle          Byte address       IP                 SM ID          Warp ID        Thread ID      Cache hit
+            return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), int(split[4]), int(split[5]), int(split[6]), split[7] == '1'
 
     train_data = []
     eval_data = []

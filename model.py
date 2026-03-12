@@ -57,6 +57,13 @@ LSTM_NUM_LAYERS = 2
 LSTM_DROPOUT = 0.0
 
 
+# The amount of warps per SM in the simulated GPU architecture
+WARPS_PER_SM = 32
+
+# The amount of threads per warp in the simulated GPU architecture
+THREADS_PER_WARP = 32
+
+
 class LSTM(nn.Module):
     def __init__(self,
                  delta_page_embed_in:int=DELTA_PAGE_EMBEDDING_INPUT,
@@ -764,7 +771,10 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         # Each access is read
         for line in data:
             # The info for this access is stored in variables
-            instr_id, cycle, load_address, ip, thread_id, cache_hit = line
+            instr_id, cycle, load_address, ip, sm_id, local_warp_id, local_thread_id, cache_hit = line
+
+            # The global thread ID is calculated
+            thread_id = sm_id * WARPS_PER_SM * THREADS_PER_WARP + local_warp_id * THREADS_PER_WARP + local_thread_id
 
             # The page is calculated
             page = load_address >> 12
