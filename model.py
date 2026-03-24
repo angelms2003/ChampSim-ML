@@ -368,7 +368,7 @@ class OptunaHyperparameterSearch:
         self.base_output_dir = base_output_dir
         self.trial_count = 0
     
-    def optimize(self, study_name:str, n_trials:int=50):
+    def optimize(self, study_name:str, n_trials:int=20):
         """
             This method performs Bayesian optimization using Optuna, finding the best
             hyperparameters
@@ -481,10 +481,10 @@ class OptunaHyperparameterSearch:
             # integer in the range [10,20]
             "tbptt_length": trial.suggest_int("tbptt_length", 10, 20),
 
-            # Number of training epochs. They are fixed to 10 to speed up
+            # Number of training epochs. They are fixed to 5 to speed up
             # trials, but will surely be larger during training once the best
             # hyperparameters have been found
-            "num_epochs": 10
+            "num_epochs": 5
         }
         
         # For each trial, we print the chosen hyperparameters
@@ -866,7 +866,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                 device = next(self.model.parameters()).device
                 sequence_tensor = torch.LongTensor(sequence[:len(targets)])
 
-                yield ip, sequence_tensor, targets, whole_windows
+                yield thread_id, sequence_tensor, targets, whole_windows
 
     
     def train_and_test(self, train_data:list, test_data:list, model_name:str=None, graph_name:str=None):

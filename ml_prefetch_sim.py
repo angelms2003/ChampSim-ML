@@ -549,9 +549,9 @@ def optuna_train_and_test_command():
     optimizer = OptunaHyperparameterSearch(train_data, test_data, args.experiments_dir)
 
     # The optimization is executed and the best parameters are
-    # found. The optimization is run for 50 trials
+    # found. The optimization is run for 10 trials
     study_name = args.model_name.split("/")[-1]
-    best_params = optimizer.optimize(study_name, n_trials=50)
+    best_params = optimizer.optimize(study_name, n_trials=10)
 
     # After finding the best parameters (located in best_params)
     # we can create the final model
