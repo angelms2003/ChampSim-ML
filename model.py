@@ -4,6 +4,7 @@
 
 from abc import abstractmethod
 from collections import defaultdict
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -161,10 +162,11 @@ class LSTM(nn.Module):
         # access patterns, and mixing them will only confuse the model
         self.states = dict()
     
+    @torch.jit.export
     def forward_sequence(self,
                          sequence:torch.Tensor,
                          thread_id:int,
-                         prev_state:tuple=None):
+                         prev_state:Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]=None):
         """
             This method defines the forward pass of data through the model.
             It processes a whole sequence of accesses for a given thread ID.
@@ -191,9 +193,9 @@ class LSTM(nn.Module):
                             sequence of the same thread ID
         """
 
-        # The device where the model is located is obtained. This will help
-        # put all tensors on the same device
-        device = next(self.parameters()).device
+        # TorchScript does not support next(self.parameters()), so we use a
+        # known parameter tensor to infer the model device.
+        device = self.page_delta_embedding.weight.device
 
         # The length of the sequence
         seq_len = sequence.shape[0]
@@ -211,7 +213,7 @@ class LSTM(nn.Module):
 
         # Here we will store the predicted page deltas and block offsets for
         # each input
-        predictions = []
+        predictions: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
         # The embeddings are prepared for the whole sequence
         for t in range(seq_len):
@@ -289,6 +291,16 @@ class LSTM(nn.Module):
         
         # The predictions and the final state are returned
         return predictions, (hidden_new, cell_new, last_page)
+
+    def forward(self,
+                sequence:torch.Tensor,
+                thread_id:int,
+                prev_state:Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]=None):
+        """
+            TorchScript/C++ entrypoint used by Vulkan-Sim fallback path.
+            It mirrors forward_sequence so both names are available in exported models.
+        """
+        return self.forward_sequence(sequence, thread_id, prev_state)
     
     def reset_state(self, thread_id:int=None):
         """
@@ -712,9 +724,8 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
         # be updated)
         self.model.eval()
         
-        # Option A: torch.jit.script (more robust). This function
-        # directly compiles the Python code without the need of
-        # an input example
+        # Option A: torch.jit.script (preferred). This preserves method names,
+        # allowing C++ runtime code to detect and call forward_sequence.
         try:
             scripted = torch.jit.script(self.model)
             scripted.save(path)
@@ -739,10 +750,31 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             if torch.cuda.is_available():
                 example_seq = example_seq.cuda()
             
-            # The input is used to save the model via the trace function
-            traced = torch.jit.trace(
-                self.model.forward_sequence,
-                (example_seq, example_thread_id, None)
+            example_hidden = torch.zeros(
+                self.model.num_layers, 1, self.model.hidden_size,
+                dtype=torch.float32
+            )
+            example_cell = torch.zeros(
+                self.model.num_layers, 1, self.model.hidden_size,
+                dtype=torch.float32
+            )
+            example_last_page = torch.tensor(0, dtype=torch.long)
+            example_prev_state = (example_hidden, example_cell, example_last_page)
+
+            if torch.cuda.is_available():
+                example_hidden = example_hidden.cuda()
+                example_cell = example_cell.cuda()
+                example_last_page = example_last_page.cuda()
+                example_prev_state = (example_hidden, example_cell, example_last_page)
+
+            # trace_module keeps a module artifact and traces both forward and
+            # forward_sequence, so Vulkan-Sim can invoke either method.
+            traced = torch.jit.trace_module(
+                self.model,
+                {
+                    "forward": (example_seq, example_thread_id, example_prev_state),
+                    "forward_sequence": (example_seq, example_thread_id, example_prev_state),
+                }
             )
             traced.save(path)
             print(f"Model successfully saved using torch.jit.trace to {path}")
