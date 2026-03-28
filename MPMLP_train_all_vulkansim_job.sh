@@ -12,8 +12,8 @@
 
 memoryPerJob="16G"
 
-#queue="small_gpu"
-queue="large"
+queue="small_gpu"
+#queue="large"
 
 models_dir_name="results/MPMLP-tolerance-vulkansim/models"
 logs_dir_name="results/MPMLP-tolerance-vulkansim/logs"
@@ -29,5 +29,5 @@ mkdir -p $graphs_dir_name
 for scene in BATH BUNNY CAR CHSNT CRNVL FOX FRST LANDS PARK PARTY REF ROBOT SHIP SPNZA SPRNG WKND;
 do
 	echo "Executing sbatch train_test_one_job.sh with arguments:" --output=${logs_dir_name}"/"${scene}"-%j.out" --error=${logs_dir_name}"/"${scene}"-error-%j.out" "--mem="$memoryPerJob "-c" 4 "-q" $queue ${train_trace_directory}"/"${scene}"-frame0.txt" ${test_trace_directory}"/"${scene}"-frame1.txt" ${models_dir_name}"/"${scene} ${graphs_dir_name}"/"${scene}
-	sbatch --output=${logs_dir_name}"/"${scene}"-%j.out" --error=${logs_dir_name}"/"${scene}"-error-%j.out" --mem=$memoryPerJob -c 4 -q $queue train_test_one_job.sh ${train_trace_directory}"/"${scene}"-frame0.txt" ${test_trace_directory}"/"${scene}"-frame1.txt" ${models_dir_name}"/"${scene} ${graphs_dir_name}"/"${scene}
+	sbatch --output=${logs_dir_name}"/"${scene}"-%j.out" --error=${logs_dir_name}"/"${scene}"-error-%j.out" --mem=$memoryPerJob -c 1 -A gpu -p gpu -q $queue --gres=gpu:1 train_test_one_job.sh ${train_trace_directory}"/"${scene}"-frame0.txt" ${test_trace_directory}"/"${scene}"-frame1.txt" ${models_dir_name}"/"${scene} ${graphs_dir_name}"/"${scene}
 done

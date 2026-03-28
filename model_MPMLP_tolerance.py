@@ -224,8 +224,8 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
                 # The output is created the same way, but using the accesses in the tolerance window,
                 # which are the accesses that should be guessed
-                #batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
-                batch_y.append(self.represent_with_tolerance(bucket_buffer[-(self.lookahead + self.k + self.tolerance):], current_page))
+                batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
+                #batch_y.append(self.represent_with_tolerance(bucket_buffer[-(self.lookahead + self.k + self.tolerance):], current_page))
 
                 # The memory addresses of every access in the window are stored for future use
                 whole_windows.append(bucket_buffer)
@@ -271,7 +271,8 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         total_score = 0.0
 
         # This is the total PTT accuracy obtained by all predictions in this batch
-        ptt_score = 0.0
+        ptt_score_tolerant = 0.0
+        ptt_score_strict = 0.0
 
         batch_size = output.shape[0]
 
@@ -288,6 +289,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
 
             ptt_useful = 0
+            ptt_useful_strict = 0
             # Count how many pages predicted by the PTT were useful
             for idx in topk_idx[i]:
                 if idx < 32:
@@ -305,8 +307,11 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 #     print(whole_window[i][self.history:])
 
                 good_access_found = False
+                strict_access_found = False
                 
-                for access in whole_window[i][self.history:]:
+                for j in range(self.history,len(whole_window[i])):
+                #for access in whole_window[i][self.history:]:
+                    access = whole_window[i][j]
                     access_page = access >> 12
                     access_block_offset = (access >> 7) % 32
                     
@@ -315,6 +320,8 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
                     if access_page == next_page and access_block_offset == block_offset:
                         good_access_found = True
+                        if j == self.history + self.k:
+                            strict_access_found = True
 
                         # if i == 0:
                         #     print(f"\t\tMATCH!")
@@ -322,13 +329,18 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 if good_access_found:
                     ptt_useful+=1
                 
-            ptt_score += ptt_useful / self.k
+                if strict_access_found:
+                    ptt_useful_strict+=1
+                    assert good_access_found, "ERROR: found a correct strict prefetch but no correct tolerant prefetch"
+            
+            ptt_score_strict += ptt_useful_strict / self.k
+            ptt_score_tolerant += ptt_useful / self.k
 
 
         # This will be 1 if everything was correct and 0 if everything was a disaster. But
         # since nothing in this life is either black or white, this can also be any value
         # between 0 and 1 depending on how the different predictions in this batch performed
-        return total_score / batch_size, ptt_score / batch_size
+        return total_score / batch_size, ptt_score_strict / batch_size, ptt_score_tolerant / batch_size
 
     def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
         print('LOOKAHEAD =', self.lookahead)
@@ -366,9 +378,11 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
         # The average accuracy for train and test in each epoch
         avg_train_accs = []
-        avg_train_ptt_accs = []
+        avg_train_ptt_accs_tolerant = []
+        avg_train_ptt_accs_strict = []
         avg_test_accs = []
-        avg_test_ptt_accs = []
+        avg_test_ptt_accs_tolerant = []
+        avg_test_ptt_accs_strict = []
 
         # The loss for train and test in each epoch
         total_train_loss = []
@@ -381,7 +395,8 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # Accuracies
             train_accs = []
-            train_ptt_accs = []
+            train_ptt_accs_tolerant = []
+            train_ptt_accs_strict = []
 
             # Calculated losses
             train_losses = []
@@ -398,7 +413,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
                 # computing the training loss and accuracy
                 loss_train = criterion(output_train, y_train)
-                acc, ptt_acc = self.accuracy(output_train, y_train, next_page, whole_windows)
+                acc, ptt_acc_strict, ptt_acc_tolerant = self.accuracy(output_train, y_train, next_page, whole_windows)
                 # print('Acc {}: {}'.format(epoch, acc))
 
                 # computing the updated weights of all the model parameters
@@ -406,17 +421,20 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                 optimizer.step()
                 tr_loss = loss_train.item()
                 train_accs.append(float(acc))
-                train_ptt_accs.append(float(ptt_acc))
+                train_ptt_accs_tolerant.append(float(ptt_acc_tolerant))
+                train_ptt_accs_strict.append(float(ptt_acc_strict))
                 train_losses.append(float(tr_loss))
                 if train_percent != 0 and i % train_percent == 0:
                     print('.', end='')
             print()
             print('Training accuracy for epoch {}: {}'.format(epoch+1, sum(train_accs) / len(train_accs)))
-            print('Training PTT accuracy for epoch {}: {}'.format(epoch+1, sum(train_ptt_accs) / len(train_ptt_accs)))
+            print('Training tolerant PTT accuracy for epoch {}: {}'.format(epoch+1, sum(train_ptt_accs_tolerant) / len(train_ptt_accs_tolerant)))
+            print('Training strict PTT accuracy for epoch {}: {}'.format(epoch+1, sum(train_ptt_accs_strict) / len(train_ptt_accs_strict)))
             print('Training epoch : ', epoch + 1, '\t', 'training loss :', sum(train_losses))
 
             avg_train_accs.append(sum(train_accs) / len(train_accs))
-            avg_train_ptt_accs.append(sum(train_ptt_accs) / len(train_ptt_accs))
+            avg_train_ptt_accs_tolerant.append(sum(train_ptt_accs_tolerant) / len(train_ptt_accs_tolerant))
+            avg_train_ptt_accs_strict.append(sum(train_ptt_accs_strict) / len(train_ptt_accs_strict))
             total_train_loss.append(sum(train_losses))
             
             ########################################################
@@ -424,7 +442,8 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # Accuracies
             test_accs = []
-            test_ptt_accs = []
+            test_ptt_accs_tolerant = []
+            test_ptt_accs_strict = []
 
             # Calculated losses
             test_losses = []
@@ -439,21 +458,24 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
                     # computing the testing loss and accuracy
                     loss_test = criterion(output_test, y_test)
-                    acc, ptt_acc = self.accuracy(output_test, y_test, next_page, whole_windows)
+                    acc, ptt_acc_strict, ptt_acc_tolerant = self.accuracy(output_test, y_test, next_page, whole_windows)
 
                     tr_loss = loss_test.item()
                     test_accs.append(float(acc))
-                    test_ptt_accs.append(float(ptt_acc))
+                    test_ptt_accs_tolerant.append(float(ptt_acc_tolerant))
+                    test_ptt_accs_strict.append(float(ptt_acc_strict))
                     test_losses.append(float(tr_loss))
                     if test_percent != 0 and i % test_percent == 0:
                         print('.', end='')
             print()
             print('Test accuracy for epoch {}: {}'.format(epoch+1, sum(test_accs) / len(test_accs)))
-            print('Test PTT accuracy for epoch {}: {}'.format(epoch+1, sum(test_ptt_accs) / len(test_ptt_accs)))
+            print('Test tolerant PTT accuracy for epoch {}: {}'.format(epoch+1, sum(test_ptt_accs_tolerant) / len(test_ptt_accs_tolerant)))
+            print('Test strict PTT accuracy for epoch {}: {}'.format(epoch+1, sum(test_ptt_accs_strict) / len(test_ptt_accs_strict)))
             print('Test epoch : ', epoch + 1, '\t', 'test loss :', sum(test_losses))
 
             avg_test_accs.append(sum(test_accs) / len(test_accs))
-            avg_test_ptt_accs.append(sum(test_ptt_accs) / len(test_ptt_accs))
+            avg_test_ptt_accs_tolerant.append(sum(test_ptt_accs_tolerant) / len(test_ptt_accs_tolerant))
+            avg_test_ptt_accs_strict.append(sum(test_ptt_accs_strict) / len(test_ptt_accs_strict))
             total_test_loss.append(sum(test_losses))
 
             # A snapshot of the model for this epoch is saved
@@ -480,29 +502,39 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             plt.figure(figsize=(22, 5))
 
-            # 1: Accuracy plot (only offsets)
+            # # 1: Accuracy plot (only offsets)
+            # plt.subplot(1, 4, 1)
+            # plt.plot(epochs, avg_train_accs, label='Train Accuracy', marker='o')
+            # plt.plot(epochs, avg_test_accs, label='Test Accuracy', marker='o')
+            # plt.xlabel('Epoch')
+            # plt.ylabel('Accuracy')
+            # plt.title('Train vs Test Accuracy (only offsets)')
+            # plt.legend()
+            # plt.grid(True)
+
+            # 1: Accuracy plot (offsets and PTT, strict)
             plt.subplot(1, 4, 1)
-            plt.plot(epochs, avg_train_accs, label='Train Accuracy', marker='o')
-            plt.plot(epochs, avg_test_accs, label='Test Accuracy', marker='o')
+            plt.plot(epochs, avg_train_ptt_accs_strict, label='Train Strict Acc', marker='o')
+            plt.plot(epochs, avg_test_ptt_accs_strict, label='Test Strict Acc', marker='o')
             plt.xlabel('Epoch')
             plt.ylabel('Accuracy')
-            plt.title('Train vs Test Accuracy (only offsets)')
+            plt.title('Train vs Test Accuracy (offsets and PTT, tolerant)')
             plt.legend()
             plt.grid(True)
 
             # 2: Accuracy plot (offsets and PTT)
             plt.subplot(1, 4, 2)
-            plt.plot(epochs, avg_train_ptt_accs, label='Train Accuracy', marker='o')
-            plt.plot(epochs, avg_test_ptt_accs, label='Test Accuracy', marker='o')
+            plt.plot(epochs, avg_train_ptt_accs_tolerant, label='Train Tolerant Acc', marker='o')
+            plt.plot(epochs, avg_test_ptt_accs_tolerant, label='Test Tolerant Acc', marker='o')
             plt.xlabel('Epoch')
             plt.ylabel('Accuracy')
-            plt.title('Train vs Test Accuracy (offsets and PTT)')
+            plt.title('Train vs Test Accuracy (offsets and PTT, tolerant)')
             plt.legend()
             plt.grid(True)
 
-            # 3: Loss plot (train)
+            # 4: Loss plot (train)
             plt.subplot(1, 4, 3)
-            plt.plot(epochs, total_train_loss, label='Train Loss', marker='o')
+            plt.plot(epochs, total_train_loss, label='Train Loss', marker='o', color='blue')
             plt.xlabel('Epoch')
             plt.ylabel('Loss')
             plt.title('Train Loss')
@@ -511,7 +543,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
 
             # 4: Loss plot (test)
             plt.subplot(1, 4, 4)
-            plt.plot(epochs, total_test_loss, label='Test Loss', marker='o')
+            plt.plot(epochs, total_test_loss, label='Test Loss', marker='o', color='orange')
             plt.xlabel('Epoch')
             plt.ylabel('Loss')
             plt.title('Test Loss')
