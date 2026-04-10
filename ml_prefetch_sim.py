@@ -430,7 +430,7 @@ def generate_prefetch_file(path, prefetches):
 def read_load_trace_data(load_trace, num_prefetch_warmup_instructions = 999999999):
     
     def process_line(line):
-        split = line.strip().split(', ')
+        split = line.strip().split(',')
         if len(split) == 5:
                    # Unique ID    Cycle          Byte address       IP                 Cache hit
             return int(split[0]), int(split[1]), int(split[2], 16), int(split[3], 16), split[4] == '1'

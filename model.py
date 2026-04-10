@@ -629,7 +629,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
 
     # The number of memory acesses to skip when prefetching. This
     # help prevent early prefetches
-    lookahead_size = 5
+    lookahead_size = 0
 
     # The number of training epochs for the LSTM
     num_epochs = 30

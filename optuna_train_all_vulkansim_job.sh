@@ -15,13 +15,13 @@ memoryPerJob="16G"
 #queue="small_gpu"
 queue="large"
 
-models_dir_name="results/optuna-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/models"
-logs_dir_name="results/optuna-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/logs"
-graphs_dir_name="results/optuna-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/graphs"
-experiments_dir_name="results/optuna-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/experiments"
+models_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-skip-0-global-tid-vulkansim/models"
+logs_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-skip-0-global-tid-vulkansim/logs"
+graphs_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-skip-0-global-tid-vulkansim/graphs"
+experiments_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-skip-0-global-tid-vulkansim/experiments"
 
-train_trace_directory="VulkanSimTrain-sid-wid-tid"
-test_trace_directory="VulkanSimTest-sid-wid-tid"
+train_trace_directory="VulkanSimTrain-sid-wid-tid-onlymiss"
+test_trace_directory="VulkanSimTest-sid-wid-tid-onlymiss"
 
 mkdir -p $models_dir_name
 mkdir -p $logs_dir_name
