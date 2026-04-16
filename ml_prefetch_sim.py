@@ -551,7 +551,7 @@ def optuna_train_and_test_command():
     # The optimization is executed and the best parameters are
     # found. The optimization is run for 10 trials
     study_name = args.model_name.split("/")[-1]
-    best_params = optimizer.optimize(study_name, n_trials=10)
+    best_params = optimizer.optimize(study_name)
 
     # After finding the best parameters (located in best_params)
     # we can create the final model
@@ -565,7 +565,7 @@ def optuna_train_and_test_command():
     
     training_params = {
         "learning_rate": best_params["learning_rate"],
-        "lookahead_size": best_params["lookahead_size"],
+        #"lookahead_size": best_params["lookahead_size"],
         "batch_size": best_params["batch_size"]
     }
 

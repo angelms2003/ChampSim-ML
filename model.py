@@ -361,7 +361,7 @@ class OptunaHyperparameterSearch:
         This class uses Optuna for Bayesian hyperparameter optimization.
     """
     
-    def __init__(self, train_data:list, test_data:list, base_output_dir:str="experiments"):
+    def __init__(self, train_data:list, test_data:list, base_output_dir:str):
         """
             The class constructor. It initializes important attributes.
 
@@ -380,7 +380,7 @@ class OptunaHyperparameterSearch:
         self.base_output_dir = base_output_dir
         self.trial_count = 0
     
-    def optimize(self, study_name:str, n_trials:int=20):
+    def optimize(self, study_name:str, n_trials:int=50):
         """
             This method performs Bayesian optimization using Optuna, finding the best
             hyperparameters
@@ -483,7 +483,7 @@ class OptunaHyperparameterSearch:
 
             # Number of accesses to skip in order to avoid prefetching too early.
             # Optuna chooses one integer in the range [3,7]
-            "lookahead_size": trial.suggest_int("lookahead_size", 3, 7),
+            #"lookahead_size": trial.suggest_int("lookahead_size", 3, 7),
 
             # Number of training examples in one batch. Optuna chooses one
             # from the list
@@ -519,9 +519,11 @@ class OptunaHyperparameterSearch:
             
             # We set the path where the model will be saved and create the
             # directory where it will be located
-            #experiment_name = f"trial_{self.trial_count:03d}"
+            experiment_name = f"trial_{self.trial_count:03d}"
             #model_path = f"{self.base_output_dir}/{experiment_name}/model"
-            #os.makedirs(f"{self.base_output_dir}/{experiment_name}", exist_ok=True)
+            #graph_path = f"{self.base_output_dir}/{experiment_name}/graph"
+            os.makedirs(f"{self.base_output_dir}/{experiment_name}", exist_ok=True)
+            print(f"Creado directorio {self.base_output_dir}/{experiment_name}")
             
             # We train and test the model. We set graph_name to None to
             # avoid saving graphs for trials
@@ -529,7 +531,7 @@ class OptunaHyperparameterSearch:
                 self.train_data,
                 self.test_data,
                 model_name=None,#model_path,
-                graph_name=None
+                graph_name=None#graph_path
             )
             
             # After finishing the training and testing, we obtain the value
