@@ -378,16 +378,16 @@ class OptunaHyperparameterSearch:
         self.train_data = train_data
         self.test_data = test_data
         self.base_output_dir = base_output_dir
-        self.trial_count = 1
+        self.trial_count = 0
     
-    def optimize(self, study_name:str, n_trials:int=50):
+    def optimize(self, study_name:str, n_trials:int):
         """
             This method performs Bayesian optimization using Optuna, finding the best
             hyperparameters
         
             Args:
                 study_name(str):            The name for this study.
-                n_trials(int, optional):    Number of trials to run. Defaults to 50.
+                n_trials(int):              Number of trials to run.
             
             Returns:
                 A tuple containing the best parameters and the study object
@@ -445,9 +445,6 @@ class OptunaHyperparameterSearch:
             Returns:
                 Test tolerant accuracy (metric to maximize)
         """
-
-        # The number of trials is increased by one
-        self.trial_count += 1
         
         # These are the hyperparameters that we will be using for the model.
         # Each hyperparameter has a name and a list or a range of possible
@@ -484,6 +481,7 @@ class OptunaHyperparameterSearch:
             # Number of accesses to skip in order to avoid prefetching too early.
             # Optuna chooses one integer in the range [1,4]
             "lookahead_size": trial.suggest_int("lookahead_size", 1, 4),
+            #"lookahead_size": 0,
 
             # Number of training examples in one batch. Optuna chooses one
             # from the list
@@ -507,6 +505,9 @@ class OptunaHyperparameterSearch:
         print("Training configuration:")
         for key, value in training_config.items():
             print(f"  {key}: {value}")
+        
+        # The number of trials is increased by one
+        self.trial_count += 1
         
         try:
             # The model is created, and the model configuration is
@@ -650,7 +651,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
     # the hidden state is kept even after calling backward.
     tbptt_length = 15
 
-    def __init__(self, model_config:dict=None, lookahead_size:int=None):
+    def __init__(self, model_config:dict=None):
         """
             Constructor for the LSTMBasedPrefetcher class.
 
@@ -660,8 +661,6 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                                             values are numbers indicating (the value of
                                             each hyperparameter). See LSTM.get_config()
                                             for more details.
-                                    
-            lookahead_size (int, optional): Number of accesses to skip when prefetching
         """
 
         # If no configuration was provided, the model is initialized
@@ -670,7 +669,6 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             self.model = LSTM()
         else:
             self.model = LSTM(**model_config)
-            self.lookahead_size = lookahead_size
     
     def set_training_config(self, config:dict):
         """

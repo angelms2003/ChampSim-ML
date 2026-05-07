@@ -548,14 +548,19 @@ def optuna_train_and_test_command():
     # The Optuna optimizer is created
     optimizer = OptunaHyperparameterSearch(train_data, test_data, args.experiments_dir)
 
-    # The optimization is executed and the best parameters are
-    # found. The optimization is run for 10 trials
+    # The optimization is executed and the best parameters are found
     study_name = args.model_name.split("/")[-1]
-    best_params = optimizer.optimize(study_name)
+    best_params = optimizer.optimize(study_name, n_trials=2)
+
+    # If there is no lookahead size, it means that we set it to a
+    # fixed value of 0 when training
+    if not "lookahead_size" in best_params:
+        best_params["lookahead_size"] = 0
 
     # After finding the best parameters (located in best_params)
     # we can create the final model
     model_params = {
+        "delta_page_embed_in": best_params["delta_page_embed_in"],
         "page_embed_dim": best_params["page_embed_dim"],
         "block_embed_dim": best_params["block_embed_dim"],
         "hidden_size": best_params["hidden_size"],
@@ -565,8 +570,9 @@ def optuna_train_and_test_command():
     
     training_params = {
         "learning_rate": best_params["learning_rate"],
-        #"lookahead_size": best_params["lookahead_size"],
-        "batch_size": best_params["batch_size"]
+        "lookahead_size": best_params["lookahead_size"],
+        "batch_size": best_params["batch_size"],
+        "tbptt_length": best_params["tbptt_length"]
     }
 
     final_prefetcher = Model(model_config=model_params)
