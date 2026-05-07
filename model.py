@@ -378,7 +378,7 @@ class OptunaHyperparameterSearch:
         self.train_data = train_data
         self.test_data = test_data
         self.base_output_dir = base_output_dir
-        self.trial_count = 0
+        self.trial_count = 1
     
     def optimize(self, study_name:str, n_trials:int=50):
         """
@@ -482,8 +482,8 @@ class OptunaHyperparameterSearch:
             "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2),
 
             # Number of accesses to skip in order to avoid prefetching too early.
-            # Optuna chooses one integer in the range [3,7]
-            #"lookahead_size": trial.suggest_int("lookahead_size", 3, 7),
+            # Optuna chooses one integer in the range [1,4]
+            "lookahead_size": trial.suggest_int("lookahead_size", 1, 4),
 
             # Number of training examples in one batch. Optuna chooses one
             # from the list
@@ -630,8 +630,8 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
     tolerance_size = 20
 
     # The number of memory acesses to skip when prefetching. This
-    # help prevent early prefetches
-    lookahead_size = 0
+    # helps prevent early prefetches
+    lookahead_size = 5
 
     # The number of training epochs for the LSTM
     num_epochs = 30
@@ -650,7 +650,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
     # the hidden state is kept even after calling backward.
     tbptt_length = 15
 
-    def __init__(self, model_config:dict=None):
+    def __init__(self, model_config:dict=None, lookahead_size:int=None):
         """
             Constructor for the LSTMBasedPrefetcher class.
 
@@ -660,6 +660,8 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                                             values are numbers indicating (the value of
                                             each hyperparameter). See LSTM.get_config()
                                             for more details.
+                                    
+            lookahead_size (int, optional): Number of accesses to skip when prefetching
         """
 
         # If no configuration was provided, the model is initialized
@@ -668,6 +670,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             self.model = LSTM()
         else:
             self.model = LSTM(**model_config)
+            self.lookahead_size = lookahead_size
     
     def set_training_config(self, config:dict):
         """
@@ -1072,9 +1075,10 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                 train_strict_accs.append(seq_strict_correct / len(targets))
                 train_tolerant_accs.append(seq_tolerant_correct / len(targets))
 
-                # A period is shown on the terminal each 100 sequences
-                if sequence_count % 100 == 0:
-                    print(".", end="", flush=True)
+                # A period is shown on the terminal each time 1% of
+                # the progress passes
+                if len(train_data)/(self.tbptt_length*100) > 0 and sequence_count % (len(train_data)/(self.tbptt_length*100)) == 0:
+                    print('.', end='', flush=True)
             
             # After training, the average strict accuracy and the average tolerant
             # accuracy are calculated and printed
@@ -1174,8 +1178,9 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
                     test_strict_accs.append(seq_strict_correct / len(targets))
                     test_tolerant_accs.append(seq_tolerant_correct / len(targets))
                     
-                    # A period is shown on the terminal each 100 sequences
-                    if sequence_count % 100 == 0:
+                    # A period is shown on the terminal each time 1% of
+                    # the progress passes
+                    if len(test_data)/(self.tbptt_length*100) > 0 and sequence_count % (len(test_data)/(self.tbptt_length*100)) == 0:
                         print('.', end='', flush=True)
                 
             # The average accuracies for this epoch are calculated and shown
@@ -1224,13 +1229,14 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
             )
         
         # Finally, all metrics are returned
+        best_index = avg_test_tolerant_accs.index(max(avg_test_tolerant_accs))
         return {
-            'train_strict_acc': avg_train_strict_accs[-1] if avg_train_strict_accs else 0,
-            'train_tolerant_acc': avg_train_tolerant_accs[-1] if avg_train_tolerant_accs else 0,
-            'test_strict_acc': avg_test_strict_accs[-1] if avg_test_strict_accs else 0,
-            'test_tolerant_acc': avg_test_tolerant_accs[-1] if avg_test_tolerant_accs else 0,
-            'train_loss': total_train_loss[-1] if total_train_loss else float('inf'),
-            'test_loss': total_test_loss[-1] if total_test_loss else float('inf'),
+            'train_strict_acc': avg_train_strict_accs[best_index] if avg_train_strict_accs else 0,
+            'train_tolerant_acc': avg_train_tolerant_accs[best_index] if avg_train_tolerant_accs else 0,
+            'test_strict_acc': avg_test_strict_accs[best_index] if avg_test_strict_accs else 0,
+            'test_tolerant_acc': avg_test_tolerant_accs[best_index] if avg_test_tolerant_accs else 0,
+            'train_loss': total_train_loss[best_index] if total_train_loss else float('inf'),
+            'test_loss': total_test_loss[best_index] if total_test_loss else float('inf'),
             'epochs_trained': len(avg_train_strict_accs)
         }
 

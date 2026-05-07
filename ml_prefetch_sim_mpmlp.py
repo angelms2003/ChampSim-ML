@@ -558,6 +558,7 @@ def optuna_train_and_test_command():
     # After finding the best parameters (located in best_params)
     # we can create the final model
     model_params = {
+        "delta_page_embed_in": best_params["delta_page_embed_in"]
         "page_embed_dim": best_params["page_embed_dim"],
         "block_embed_dim": best_params["block_embed_dim"],
         "hidden_size": best_params["hidden_size"],
@@ -568,10 +569,11 @@ def optuna_train_and_test_command():
     training_params = {
         "learning_rate": best_params["learning_rate"],
         "lookahead_size": best_params["lookahead_size"],
-        "batch_size": best_params["batch_size"]
+        "batch_size": best_params["batch_size"],
+        "tbptt_length": best_params["tbptt_length"],
     }
 
-    final_prefetcher = Model(model_config=model_params)
+    final_prefetcher = Model(model_config=model_params, lookahead_size=training_params["lookahead_size"])
     final_prefetcher.set_training_config(training_params)
 
     final_prefetcher.train_and_test(
