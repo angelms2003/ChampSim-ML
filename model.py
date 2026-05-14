@@ -150,12 +150,16 @@ class LSTM(nn.Module):
         )
         
         # Una capa fully connected que toma el último estado oculto
-        # de la LSTM y devuelve un delta de página
+        # de la LSTM y devuelve los logits de delta de página
         self.fc_page_delta = nn.Linear(hidden_size, delta_page_embed_in)
 
         # Una capa fully connected que toma el último estado oculto
-        # de la LSTM y devuelve un offset de bloque
+        # de la LSTM y devuelve los logits de offset de bloque
         self.fc_block = nn.Linear(hidden_size, BLOCK_OFFSET_EMBEDDING_INPUT)
+
+        # Una capa softmax que se aplica a los logits que devuelven las capas
+        # fc_page_delta y fc_block para obtener probabilidades
+        self.softmax = nn.Softmax(dim=1)
 
         # A dictionary that saves the state of the model for each different
         # thread ID, since different threads will have different memory
@@ -283,12 +287,17 @@ class LSTM(nn.Module):
 
             # The predictions are done using the fully connected layers. The
             # input for these layers is the hidden state
-            page_delta_pred = self.fc_page_delta(state_t.unsqueeze(0))
-            block_pred = self.fc_block(state_t.unsqueeze(0))
+            page_delta_logits = self.fc_page_delta(state_t.unsqueeze(0))
+            block_logits = self.fc_block(state_t.unsqueeze(0))
+
+            # The logits are transformed into probability distributions
+            # using the softmax layer
+            page_delta_softmax = self.softmax(page_delta_logits)
+            block_softmax = self.softmax(block_logits)
 
             # The prediction is appended to the predictions list
-            predictions.append((page_delta_pred, block_pred))
-        
+            predictions.append((page_delta_softmax, block_softmax))
+
         # The predictions and the final state are returned
         return predictions, (hidden_new, cell_new, last_page)
 
@@ -632,7 +641,7 @@ class LSTMBasedPrefetcher(MLPrefetchModel):
 
     # The number of memory acesses to skip when prefetching. This
     # helps prevent early prefetches
-    lookahead_size = 5
+    lookahead_size = 0
 
     # The number of training epochs for the LSTM
     num_epochs = 30

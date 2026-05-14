@@ -551,7 +551,7 @@ def optuna_train_and_test_command():
     # The optimization is executed and the best parameters are
     # found. The optimization is run for 50 trials
     study_name = args.model_name.split("/")[-1]
-    best_params = optimizer.optimize(study_name, n_trials=50)
+    best_params = optimizer.optimize(study_name, n_trials=2)
 
     # If there is no lookahead size, it means that we set it to a
     # fixed value of 0 when training
