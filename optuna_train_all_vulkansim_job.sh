@@ -14,10 +14,12 @@ memoryPerJob="16G"
 
 queue="huge"
 
-models_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/models"
-logs_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/logs"
-graphs_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/graphs"
-experiments_dir_name="results/optuna-onlymiss-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim/experiments"
+execution_name="optuna-onlymiss-softmax-delta-stateful-tolerance-20-with-lookahead-global-tid-vulkansim"
+
+models_dir_name="results/"${execution_name}"/models"
+logs_dir_name="results/"${execution_name}"/logs"
+graphs_dir_name="results/"${execution_name}"/graphs"
+experiments_dir_name="results/"${execution_name}"/experiments"
 
 train_trace_directory="VulkanSimTrain-sid-wid-tid-onlymiss"
 test_trace_directory="VulkanSimTest-sid-wid-tid-onlymiss"

@@ -159,7 +159,7 @@ class LSTM(nn.Module):
 
         # Una capa softmax que se aplica a los logits que devuelven las capas
         # fc_page_delta y fc_block para obtener probabilidades
-        self.softmax = nn.Softmax(dim=1)
+        # self.softmax = nn.Softmax(dim=1)
 
         # A dictionary that saves the state of the model for each different
         # thread ID, since different threads will have different memory
@@ -292,13 +292,13 @@ class LSTM(nn.Module):
 
             # The logits are transformed into probability distributions
             # using the softmax layer
-            page_delta_softmax = self.softmax(page_delta_logits)
-            block_softmax = self.softmax(block_logits)
+            # page_delta_softmax = self.softmax(page_delta_logits)
+            # block_softmax = self.softmax(block_logits)
 
             # The prediction is appended to the predictions list
-            predictions.append((page_delta_softmax, block_softmax))
+            # predictions.append((page_delta_softmax, block_softmax))
 
-            # predictions.append((page_delta_logits, block_logits))
+            predictions.append((page_delta_logits, block_logits))
 
         # The predictions and the final state are returned
         return predictions, (hidden_new, cell_new, last_page)

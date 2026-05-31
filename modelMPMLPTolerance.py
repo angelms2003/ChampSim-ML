@@ -11,10 +11,17 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from time import time
 
+# The amount of warps per SM in the simulated GPU architecture
+WARPS_PER_SM = 32
+
+# The amount of threads per warp in the simulated GPU architecture
+THREADS_PER_WARP = 32
+
 class MLP(nn.Module):
 
     def __init__(self):
         super().__init__()
+        print("Initializing MLP object")
         self.feature = nn.Sequential(
             # nn.Linear(128, 57 * 8),
             nn.Linear(64, 57 * 8),
@@ -119,7 +126,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
     
     model_class = eval(os.environ.get('CNN_MODEL_CLASS', 'MLP'))
     history = int(os.environ.get('CNN_HISTORY', '4'))
-    lookahead = int(os.environ.get('LOOKAHEAD', '5'))
+    lookahead = int(os.environ.get('LOOKAHEAD', '1'))
     bucket = os.environ.get('BUCKET', 'ip')
     epochs = int(os.environ.get('EPOCHS', '30'))
     lr = float(os.environ.get('CNN_LR', '0.002'))
@@ -177,8 +184,8 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             # The load instruction is appended to the list
             bucket_buffer.append(load_address)
 
-            # Just like we appended the address to bucket_data[ip], we
-            # append the instruction ID to bucket_instruction_ids[ip]
+            # Just like we appended the address to bucket_data[bucket_key], we
+            # append the instruction ID to bucket_instruction_ids[bucket_key]
             bucket_instruction_ids[bucket_key].append(instr_id)
 
             # The bucket_buffer size is limited to the size of the window that
@@ -343,8 +350,13 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
         return total_score / batch_size, ptt_score_strict / batch_size, ptt_score_tolerant / batch_size
 
     def train_and_test(self, train_data, test_data, model_name = None, graph_name = None):
-        print('LOOKAHEAD =', self.lookahead)
-        print('BUCKET =', self.bucket)
+        print(f"Called train_and_test method. Training with the following hyperparameters:")
+        print(f"\t- history = {self.history}")
+        print(f"\t- lookahead = {self.lookahead}")
+        print(f"\t- bucket = {self.bucket}")
+        print(f"\t- epochs = {self.epochs}")
+        print(f"\t- learning rate = {self.lr}")
+        print(f"\t- batch_size = {self.batch_size}")
 
         # Number of epochs without improvement before stopping
         patience = 3
@@ -468,14 +480,14 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
                     if test_percent != 0 and i % test_percent == 0:
                         print('.', end='')
             print()
-            print('Test accuracy for epoch {}: {}'.format(epoch+1, sum(test_accs) / len(test_accs)))
-            print('Test tolerant PTT accuracy for epoch {}: {}'.format(epoch+1, sum(test_ptt_accs_tolerant) / len(test_ptt_accs_tolerant)))
-            print('Test strict PTT accuracy for epoch {}: {}'.format(epoch+1, sum(test_ptt_accs_strict) / len(test_ptt_accs_strict)))
+            print('Test accuracy for epoch {}: {}'.format(epoch+1, (sum(test_accs) / len(test_accs)) if len(test_accs) != 0 else 0))
+            print('Test tolerant PTT accuracy for epoch {}: {}'.format(epoch+1, (sum(test_ptt_accs_tolerant) / len(test_ptt_accs_tolerant)) if len(test_ptt_accs_tolerant) != 0 else 0))
+            print('Test strict PTT accuracy for epoch {}: {}'.format(epoch+1, (sum(test_ptt_accs_strict) / len(test_ptt_accs_strict)) if len(test_ptt_accs_strict) != 0 else 0))
             print('Test epoch : ', epoch + 1, '\t', 'test loss :', sum(test_losses))
 
-            avg_test_accs.append(sum(test_accs) / len(test_accs))
-            avg_test_ptt_accs_tolerant.append(sum(test_ptt_accs_tolerant) / len(test_ptt_accs_tolerant))
-            avg_test_ptt_accs_strict.append(sum(test_ptt_accs_strict) / len(test_ptt_accs_strict))
+            avg_test_accs.append((sum(test_accs) / len(test_accs)) if len(test_accs) != 0 else 0)
+            avg_test_ptt_accs_tolerant.append((sum(test_ptt_accs_tolerant) / len(test_ptt_accs_tolerant)) if len(test_ptt_accs_tolerant) != 0 else 0)
+            avg_test_ptt_accs_strict.append((sum(test_ptt_accs_strict) / len(test_ptt_accs_strict)) if len(test_ptt_accs_strict) != 0 else 0)
             total_test_loss.append(sum(test_losses))
 
             # A snapshot of the model for this epoch is saved
@@ -518,7 +530,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
             plt.plot(epochs, avg_test_ptt_accs_strict, label='Test Strict Acc', marker='o')
             plt.xlabel('Epoch')
             plt.ylabel('Accuracy')
-            plt.title('Train vs Test Accuracy (offsets and PTT, tolerant)')
+            plt.title('Train vs Test Accuracy (offsets and PTT, strict)')
             plt.legend()
             plt.grid(True)
 

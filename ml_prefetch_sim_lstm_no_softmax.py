@@ -2,7 +2,8 @@ import argparse
 import os
 import sys
 
-from modelMPMLPTolerance import Model
+from modelUltimateLSTMNoSoftmax import Model
+from modelUltimateLSTMNoSoftmax import OptunaHyperparameterSearch
 
 default_results_dir = './results'
 default_output_file = './stats.csv'
@@ -541,12 +542,11 @@ def optuna_train_and_test_command():
     train_data, unused = read_load_trace_data(args.train_load_trace)
     test_data, unused = read_load_trace_data(args.test_load_trace)
 
-    print("Traning data size:",len(train_data))
-    print("Test data size:",len(test_data))
+    print("Traning data size:",len(train_data[:300000]))
+    print("Test data size:",len(test_data[:300000]))
 
-    from model import OptunaHyperparameterSearch
     # The Optuna optimizer is created
-    optimizer = OptunaHyperparameterSearch(train_data, test_data, args.experiments_dir)
+    optimizer = OptunaHyperparameterSearch(train_data[:300000], test_data[:300000], args.experiments_dir)
 
     # The optimization is executed and the best parameters are
     # found. The optimization is run for 50 trials
