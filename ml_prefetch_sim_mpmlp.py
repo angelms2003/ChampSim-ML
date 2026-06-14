@@ -449,6 +449,8 @@ def read_load_trace_data(load_trace, num_prefetch_warmup_instructions = 99999999
                 if line.startswith('***') or line.startswith('Read'):
                     continue
                 pline = process_line(line)
+                if pline is None:
+                    continue
                 if pline[0] < num_prefetch_warmup_instructions * 1000000:
                     train_data.append(pline)
                 else:
