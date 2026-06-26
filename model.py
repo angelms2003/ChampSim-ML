@@ -24,10 +24,10 @@ import matplotlib.pyplot as plt
 # · La página actual [0]
 # En caso de que el delta sea más grande, se tendrá que
 # hacer un clamp (llevarlo a -2048 o 2048)
-DELTA_PAGE_EMBEDDING_INPUT = 4097
+DELTA_PAGE_EMBEDDING_INPUT = 2049
 
 # El tamaño del vector de embedding de delta de página
-DELTA_PAGE_EMBEDDING_OUTPUT = 24
+DELTA_PAGE_EMBEDDING_OUTPUT = 20
 
 
 # El tamaño de entrada del embedding de offset de bloque.
@@ -46,12 +46,12 @@ BLOCK_OFFSET_EMBEDDING_OUTPUT = 12
 # lo suficientemente grande para calcular patrones complejos.
 # Internamente, la LSTM tiene 4 x 128 = 512 neuronas, porque
 # tiene 4 puertas o "gates": input, output, forget y cell
-LSTM_HIDDEN_SIZE = 128
+LSTM_HIDDEN_SIZE = 72
 
 # El número de capas LSTM a utilizar. Se utilizan 2: la primera
 # aprende patrones sencillos mientras que la segunda aprende
 # patrones más complejos
-LSTM_NUM_LAYERS = 2
+LSTM_NUM_LAYERS = 1
 
 # The dropout probability to use in the LSTM (this will only be
 # used if there are 2 layers or more)

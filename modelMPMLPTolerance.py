@@ -126,7 +126,7 @@ class MLPBasedSubPrefetcher(MLPrefetchModel):
     
     model_class = eval(os.environ.get('CNN_MODEL_CLASS', 'MLP'))
     history = int(os.environ.get('CNN_HISTORY', '4'))
-    lookahead = int(os.environ.get('LOOKAHEAD', '1'))
+    lookahead = int(os.environ.get('LOOKAHEAD', '5'))
     bucket = os.environ.get('BUCKET', 'ip')
     epochs = int(os.environ.get('EPOCHS', '30'))
     lr = float(os.environ.get('CNN_LR', '0.002'))
